@@ -2,7 +2,7 @@ import streamlit as st
 import calendar
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Optimiseur Vincent V29 - TOTAL", layout="wide")
+st.set_page_config(page_title="Optimiseur Vincent V30 - FC Protégé", layout="wide")
 
 # --- 1. STYLE CSS COMPLET (FLASH & CONTRASTE) ---
 st.markdown("""
@@ -39,7 +39,8 @@ if 'cal_map' not in st.session_state:
 jours_complets = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
 def get_theoretical_status(date, o_i, o_p):
-    f = {(1,1):"FC",(1,5):"FC",(8,5):"FC",(14,5):"FC",(25,5):"FC",(14,7):"FC",(15,8):"FC",(1,11):"FC",(11,11):"FC",(25,12):"FC"}
+    # Liste des jours fériés
+    f = {(1,1):"An",(1,5):"1er Mai",(8,5):"8 Mai",(14,5):"Asc.",(25,5):"Pent.",(14,7):"F.Nat.",(15,8):"Ass.",(1,11):"Touss.",(11,11):"Arm.",(25,12):"Noël"}
     if f.get((date.day, date.month)): return "FC"
     wn = date.isocalendar()[1]
     off_list = o_p if wn % 2 == 0 else o_i
@@ -47,22 +48,34 @@ def get_theoretical_status(date, o_i, o_p):
 
 def compute_cz_internal(temp_map, start, end, o_i, o_p):
     cz_days = set()
-    # On balaie par semaine pour appliquer la règle CZ
     curr_w = start - timedelta(days=start.weekday())
     while curr_w <= end + timedelta(days=7):
         wn = curr_w.isocalendar()[1]
         off_list_theo = o_p if wn % 2 == 0 else o_i
-        if len(off_list_theo) >= 3:
-            week_dates = [curr_w + timedelta(days=i) for i in range(7)]
+        
+        # On compte les jours de "repos" théoriques (ZZ + FC)
+        week_dates = [curr_w + timedelta(days=i) for i in range(7)]
+        week_repos_count = 0
+        for dt in week_dates:
+            st_theo = get_theoretical_status(dt, o_i, o_p)
+            if st_theo in ["ZZ", "FC"]:
+                week_repos_count += 1
+        
+        # RÈGLE : Si la semaine a minimum 3 jours de repos (ZZ ou FC)
+        if week_repos_count >= 3:
             states = [temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) for dt in week_dates]
+            # Si un CX est posé et qu'aucun C4 ne protège la semaine
             if "CX" in states and "C4" not in states:
+                # On cherche un ZZ uniquement (Le FC est protégé !)
                 for dt in week_dates:
-                    if temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) in ["ZZ", "FC"]:
-                        cz_days.add(dt); break
+                    current_st = temp_map.get(dt, get_theoretical_status(dt, o_i, o_p))
+                    if current_st == "ZZ": # Changement ici : uniquement ZZ
+                        cz_days.add(dt)
+                        break
         curr_w += timedelta(days=7)
     return cz_days
 
-# --- 3. BARRE LATÉRALE (PARAMÈTRES ET ACTIONS) ---
+# --- 3. BARRE LATÉRALE ---
 with st.sidebar:
     st.title("⚙️ RÉGLAGES")
     off_impair = st.multiselect("Repos IMPAIRS", jours_complets, default=["Lundi", "Samedi"])
@@ -82,7 +95,6 @@ with st.sidebar:
         new_map = {}
         curr, c4_count = d_start, 0
         while curr <= d_end:
-            # Vérification du quota avant de poser
             temp_cz = compute_cz_internal(new_map, d_start, d_end, off_impair, off_pair)
             cx_actuels = sum(1 for v in new_map.values() if v == "CX")
             if (cx_actuels + len(temp_cz)) >= quota_max: break
@@ -92,7 +104,6 @@ with st.sidebar:
                     new_map[curr] = "C4"; c4_count += 1
                 else:
                     new_map[curr] = "CX"
-                    # Si cet ajout dépasse le quota (avec le CZ induit), on annule
                     cz_after = compute_cz_internal(new_map, d_start, d_end, off_impair, off_pair)
                     if (sum(1 for v in new_map.values() if v == "CX") + len(cz_after)) > quota_max:
                         del new_map[curr]
@@ -106,10 +117,10 @@ with st.sidebar:
         curr = d_start
         while curr <= d_end:
             new_map[curr] = "CX"
-            # On vérifie si le bloc dépasse le quota
             cz_check = compute_cz_internal(new_map, d_start, d_end, off_impair, off_pair)
             if (sum(1 for v in new_map.values() if v == "CX") + len(cz_check)) > quota_max:
-                break # On s'arrête dès que le quota est atteint
+                del new_map[curr]
+                break
             curr += timedelta(days=1)
         st.session_state.cal_map = new_map
         st.rerun()
@@ -118,7 +129,7 @@ with st.sidebar:
         st.session_state.cal_map = {}
         st.rerun()
 
-# --- 4. CALCULS ET COMPTEURS ---
+# --- 4. CALCULS ---
 cz_active_days = compute_cz_internal(st.session_state.cal_map, d_start, d_end, off_impair, off_pair)
 cx_posés = sum(1 for d, v in st.session_state.cal_map.items() if v == "CX" and d_start <= d <= d_end)
 cz_count = len([d for d in cz_active_days if d_start <= d <= d_end])
@@ -126,8 +137,8 @@ conges_consommes = cx_posés + cz_count
 absence_totale = (d_end - d_start).days + 1
 gain = absence_totale - conges_consommes
 
-# --- 5. AFFICHAGE DES MÉTRIQUES ---
-st.title("🛡️ OPTIMISEUR VINCENT V29")
+# --- 5. AFFICHAGE MÉTRIQUES ---
+st.title("🛡️ OPTIMISEUR VINCENT V30")
 
 c1, c2, c3 = st.columns(3)
 with c1: 
@@ -144,13 +155,13 @@ if conges_consommes > quota_max:
 st.divider()
 
 # --- 6. GRILLE CALENDRIER ---
-mois_a_afficher = sorted(list(set([(d.year, d.month) for d in [d_start + timedelta(days=i) for i in range((d_end-d_start).days + 1)]])))
+dates_p = [d_start + timedelta(days=i) for i in range((d_end - d_start).days + 1)]
+mois_a_afficher = sorted(list(set([(d.year, d.month) for d in dates_p])))
 
 for year, month in mois_a_afficher:
     st.markdown(f"## 🗓️ {calendar.month_name[month].upper()} {year}")
     cols_h = st.columns(7)
-    for idx, j_nom in enumerate(jours_complets):
-        cols_h[idx].caption(j_nom)
+    for idx, j_nom in enumerate(jours_complets): cols_h[idx].caption(j_nom)
     
     cal = calendar.Calendar(firstweekday=0)
     for week in cal.monthdatescalendar(year, month):
@@ -179,5 +190,3 @@ for year, month in mois_a_afficher:
                     if new_val != status:
                         st.session_state.cal_map[d] = new_val
                         st.rerun()
-                else:
-                    st.write("") # Maintien de l'espace pour l'alignement
