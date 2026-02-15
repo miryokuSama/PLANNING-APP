@@ -3,7 +3,7 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39", layout="wide")
+st.set_page_config(page_title="OPTICX31/39 - V39", layout="wide")
 
 # --- STYLE VISUEL ---
 st.markdown("""
@@ -14,11 +14,15 @@ st.markdown("""
     .bg-c4 { background-color: #A000FF !important; color: white !important; border: 2px solid #000; } 
     .bg-cz { background-color: #FF0000 !important; color: white !important; border: 2px solid #000; }
     .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
+    
     .day-card { border-radius: 10px; padding: 10px; min-height: 140px; text-align: center; box-shadow: 4px 4px 0px #222; margin-bottom: 5px; display: flex; flex-direction: column; justify-content: center; }
     .date-num { font-size: 2.5rem; font-weight: 900; line-height: 1; }
     .status-code { font-size: 1.4rem; font-weight: 900; margin-top: 5px; }
-    .metric-box { background: #222; color: #00FF00; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #00FF00; }
-    .metric-box h1 { font-size: 3rem; margin: 0; }
+    
+    .metric-box { background: #222; color: #00FF00; padding: 20px; border-radius: 15px; text-align: center; border: 3px solid #00FF00; margin-bottom: 20px; }
+    .metric-box h1 { font-size: 4rem; margin: 0; }
+    .metric-label { font-size: 1.2rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+    
     .main-title { font-size: 4rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
     </style>
 """, unsafe_allow_html=True)
@@ -27,7 +31,6 @@ st.markdown("""
 if 'cal_map' not in st.session_state:
     st.session_state.cal_map = {}
 
-# On définit le dimanche en premier (Index 0 pour le calendrier Dimanche-Samedi)
 jours_noms = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
 
 # --- FONCTIONS LOGIQUES ---
@@ -39,11 +42,11 @@ def get_theo_status(date, off_i, off_p):
     if is_holiday(date): return "FC"
     week_num = date.isocalendar()[1]
     repos_prevus = off_p if week_num % 2 == 0 else off_i
+    # (date.weekday() + 1) % 7 pour adapter au format Dimanche=0
     return "ZZ" if jours_noms[ (date.weekday() + 1) % 7 ] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
     cz_days = set()
-    # Début au dimanche précédent
     delta_dimanche = (start_view.weekday() + 1) % 7
     curr = start_view - timedelta(days=delta_dimanche)
     
@@ -53,7 +56,6 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
         for d in week_dates:
             week_num = d.isocalendar()[1]
             repos_cycle = off_p if week_num % 2 == 0 else off_i
-            # Index ajusté pour faire correspondre le nom du jour avec jours_noms
             if jours_noms[(d.weekday() + 1) % 7] in repos_cycle:
                 nb_repos_trigger += 1
         
@@ -68,19 +70,25 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
         curr += timedelta(days=7)
     return cz_days
 
-# --- SIDEBAR & SYNCHRO DATES ---
+# Fonction utilitaire pour savoir si un jour est "OFF" (Repos, Congé, Férié, etc.)
+def is_day_off(date, current_map, cz_set, off_i, off_p):
+    # Si c'est un CZ calculé, c'est OFF
+    if date in cz_set: return True
+    # Sinon on regarde le statut (manuel ou théorique)
+    status = current_map.get(date, get_theo_status(date, off_i, off_p))
+    return status != "TRA"
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ CONFIGURATION")
     off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Dimanche", "Lundi"])
     off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Dimanche", "Lundi", "Samedi"])
     
     st.divider()
-    # Logique de synchro auto : d_start influence la valeur par défaut de d_end
     d_start = st.date_input("Début absence", datetime(2026, 5, 10))
-    d_end = st.date_input("Fin absence", value=d_start) # J+0 automatique
+    d_end = st.date_input("Fin absence", value=d_start)
     
-    if d_end < d_start:
-        st.error("La fin ne peut pas être avant le début.")
+    if d_end < d_start: st.error("Erreur de dates")
 
     st.divider()
     quota_limit = st.number_input("Quota Max (CX+CZ)", value=17)
@@ -116,27 +124,54 @@ if len(mois_affichage) < 2:
     mois_affichage.append((y, m))
 
 v_start = datetime(mois_affichage[0][0], mois_affichage[0][1], 1).date()
-v_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=10)
+v_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=14) # Marge large pour le calcul
 
+# 1. Calcul des CZ
 cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
+
+# 2. Calcul du Quota
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
 decompte = nb_cx + len(cz_totaux)
 
-# --- DASHBOARD ---
-c1, c2, c3 = st.columns(3)
+# 3. Calcul du "Tunnel de Repos" (Repos Consécutifs)
+# On part de la date de début et on recule tant que c'est OFF
+streak_start = d_start
+while is_day_off(streak_start - timedelta(days=1), st.session_state.cal_map, cz_totaux, off_i, off_p):
+    streak_start -= timedelta(days=1)
+
+# On part de la date de fin et on avance tant que c'est OFF
+streak_end = d_end
+while is_day_off(streak_end + timedelta(days=1), st.session_state.cal_map, cz_totaux, off_i, off_p):
+    streak_end += timedelta(days=1)
+
+total_repos_consecutif = (streak_end - streak_start).days + 1
+
+# --- DASHBOARD (2 COLONNES) ---
+c1, c2 = st.columns(2)
+
 with c1: 
     color = "#FF0000" if decompte > quota_limit else "#00FF00"
-    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1>QUOTA</div>', unsafe_allow_html=True)
-with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>JOURS</div>', unsafe_allow_html=True)
-with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte}</h1>GAIN</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+        <div class="metric-box" style="border-color:{color}; color:{color};">
+            <h1>{decompte}/{quota_limit}</h1>
+            <div class="metric-label">Décompté (Quota)</div>
+        </div>
+    """, unsafe_allow_html=True)
 
-# --- CALENDRIER (START SUNDAY) ---
+with c2: 
+    st.markdown(f"""
+        <div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;">
+            <h1>{total_repos_consecutif}</h1>
+            <div class="metric-label">Tunnel de Repos (Jours Consécutifs)</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+# --- CALENDRIER ---
 for yr, mo in mois_affichage:
     st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
     cols_h = st.columns(7)
     for idx, n in enumerate(jours_noms): cols_h[idx].caption(n)
     
-    # calendar.SUNDAY définit le début de semaine dans l'itérateur
     for week in calendar.Calendar(firstweekday=calendar.SUNDAY).monthdatescalendar(yr, mo):
         cols = st.columns(7)
         for i, d in enumerate(week):
@@ -146,10 +181,15 @@ for yr, mo in mois_affichage:
             is_cz = d in cz_totaux
             display = "CZ" if is_cz else user_val
             
+            # Gestion de la couleur de fond
+            bg_class = f"bg-{display.lower()}"
+            
             with cols[i]:
-                st.markdown(f'<div class="day-card bg-{display.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="day-card {bg_class}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
+                
                 opts = ["TRA", "ZZ", "CX", "C4", "FC"]
                 if user_val not in opts: user_val = "TRA"
+                
                 selection = st.selectbox("Action", opts, index=opts.index(user_val), key=f"s_{d.isoformat()}", label_visibility="collapsed")
                 if selection != user_val:
                     st.session_state.cal_map[d] = selection
