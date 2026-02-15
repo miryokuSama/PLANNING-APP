@@ -135,4 +135,4 @@ if st.button("🚀 LANCER L'ANALYSE", use_container_width=True):
                                 </div>
                             ''', unsafe_allow_html=True)
             if curr_m.month == 12: curr_m = curr_m.replace(year=curr_m.year+1, month=1)
-            else: curr_m = curr_m.replace(month=curr_m.
+            else: curr_m = curr_m.replace(month=curr_m.month+1)
