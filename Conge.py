@@ -1,160 +1,121 @@
 import streamlit as st
 import pandas as pd
-import holidays
 from datetime import datetime, timedelta
 
-# --- 1. INITIALISATION DES ÉTATS (Sécurité Streamlit Cloud) ---
-if 'repos_pair' not in st.session_state:
-    st.session_state.repos_pair = ['Saturday', 'Sunday']
-if 'repos_impair' not in st.session_state:
-    st.session_state.repos_impair = ['Saturday', 'Sunday']
+# Tentative d'import de holidays avec gestion d'erreur gracieuse
+try:
+    import holidays
+except ImportError:
+    st.error("L'application est en cours de configuration. Veuillez patienter 30 secondes et rafraîchir la page (Fichier requirements.txt en cours d'installation).")
+    st.stop()
+
+# --- INITIALISATION ---
 if 'selected_cx' not in st.session_state:
     st.session_state.selected_cx = []
 
-# --- 2. CONFIGURATION DE LA PAGE ---
-st.set_page_config(layout="wide", page_title="OptiCongés V24", page_icon="📅")
+st.set_page_config(layout="wide", page_title="OptiCongés V24")
 
-# --- 3. LOGIQUE MÉTIER ---
+# --- LOGIQUE MÉTIER ---
 
-def get_holiday_name(date):
-    """Récupère le nom du jour férié français s'il existe."""
-    fr_holidays = holidays.France(years=date.year)
-    return fr_holidays.get(date)
+def get_fr_holidays(year):
+    return holidays.France(years=year)
 
-def get_is_even(date):
-    """Vérifie si la semaine ISO est paire."""
-    return date.isocalendar()[1] % 2 == 0
-
-def apply_v24_logic(df):
-    """
-    Applique la cascade de priorités :
-    1. Férié (FC) - Jaune
-    2. Repos (ZZ) - Vert
-    3. Congé (CX) - Bleu
-    4. Forfait (CZ) - Rouge (Si >= 3 repos + 1 CX, sauf si V24 brise la règle)
-    """
+def apply_v24_logic(df, repos_p, repos_i):
     df['Type'] = "TRAVAIL"
     df['Label'] = "Travail"
     df['Color'] = "#ffffff"
     
-    # Étape A : Marquage des bases (Fériés et Repos selon Profil)
+    fr_holidays = get_fr_holidays(df['Date'].dt.year.unique().tolist())
+
     for i, row in df.iterrows():
         d = row['Date']
-        is_even = get_is_even(d)
-        day_name = d.strftime('%A')
-        holiday = get_holiday_name(d)
-        
-        repos_config = st.session_state.repos_pair if is_even else st.session_state.repos_impair
-        
-        if holiday:
+        # 1. Gestion des Fériés (Priorité Absolue)
+        if d in fr_holidays:
             df.at[i, 'Type'] = "FC"
-            df.at[i, 'Label'] = f"Férié ({holiday})"
+            df.at[i, 'Label'] = f"Férié ({fr_holidays.get(d)})"
             df.at[i, 'Color'] = "#f1c40f" # Jaune
-        elif day_name in repos_config:
+            continue
+
+        # 2. Gestion des Repos Théoriques (ZZ)
+        is_even = d.isocalendar()[1] % 2 == 0
+        day_name = d.strftime('%A')
+        current_repos = repos_p if is_even else repos_i
+        
+        if day_name in current_repos:
             df.at[i, 'Type'] = "ZZ"
             df.at[i, 'Label'] = "Repos (ZZ)"
             df.at[i, 'Color'] = "#2ecc71" # Vert
-            
-    # Étape B : Injection des Congés (CX) manuels
+
+    # 3. Injection des Congés (CX)
     for d_cx in st.session_state.selected_cx:
-        # On convertit en datetime pour la comparaison
-        d_cx_dt = pd.to_datetime(d_cx)
-        idx = df[df['Date'] == d_cx_dt].index
+        idx = df[df['Date'].dt.date == d_cx].index
         if not idx.empty:
             df.at[idx[0], 'Type'] = "CX"
             df.at[idx[0], 'Label'] = "Congé Payé (CX)"
             df.at[idx[0], 'Color'] = "#3498db" # Bleu
 
-    # Étape C : La Règle du Forfait (Transformation ZZ -> CZ)
-    # Analyse par bloc de semaine ISO
+    # 4. Règle du Forfait 5 Jours & V24
     df['Week'] = df['Date'].dt.isocalendar().week
-    df['Year'] = df['Date'].dt.isocalendar().year
-    
-    for (y, w), week_data in df.groupby(['Year', 'Week']):
-        indices = week_data.index
-        # On compte les jours de "repos" au sens large (ZZ + FC)
-        repos_count = len(week_data[week_data['Type'].isin(['ZZ', 'FC'])])
-        has_cx = (week_data['Type'] == 'CX').any()
+    for (year, week), week_data in df.groupby([df['Date'].dt.year, 'Week']):
+        # Un jour férié tombant sur un repos compte dans le quota des 3 jours
+        # Mais on ne taxe que les ZZ (verts)
+        repos_theoriques = week_data[week_data['Type'].isin(['ZZ', 'FC'])]
+        has_cx = (week_data['Type'] == "CX").any()
         
-        # Condition Forfait : 3 repos minimum et au moins 1 jour de congé posé
-        if repos_count >= 3 and has_cx:
-            # --- Règle V24 (Rupture du forfait) ---
-            # Si la semaine finit par CX puis Travail (RAT), on peut potentiellement casser le forfait
-            is_v24_broken = False
-            types_list = week_data['Type'].tolist()
-            if len(types_list) >= 2:
-                if types_list[-1] == "TRAVAIL" and types_list[-2] == "CX":
-                    is_v24_broken = True
+        if len(repos_theoriques) >= 3 and has_cx:
+            # Vérification Rupture V24 (si la semaine finit par CX -> TRAVAIL)
+            types = week_data['Type'].tolist()
+            is_v24_broken = (types[-1] == "TRAVAIL" and types[-2] == "CX")
             
             if not is_v24_broken:
-                # Transformer le PREMIER ZZ disponible en CZ (Taxe)
-                zz_indices = week_data[week_data['Type'] == 'ZZ'].index
-                if not zz_indices.empty:
-                    target_idx = zz_indices[0]
-                    df.at[target_idx, 'Type'] = "CZ"
-                    df.at[target_idx, 'Label'] = "Forfait (CZ)"
-                    df.at[target_idx, 'Color'] = "#e74c3c" # Rouge
-
+                zz_only = week_data[week_data['Type'] == "ZZ"].index
+                if not zz_only.empty:
+                    df.at[zz_only[0], 'Type'] = "CZ"
+                    df.at[zz_only[0], 'Label'] = "Forfait (CZ)"
+                    df.at[zz_only[0], 'Color'] = "#e74c3c" # Rouge
     return df
 
-# --- 4. INTERFACE UTILISATEUR ---
-
-st.title("🚀 Optimiseur de Cycle - Règle V24")
-st.info("Priorités : Férié (Jaune) > Forfait (Rouge) > Congé (Bleu) > Repos (Vert)")
+# --- INTERFACE ---
+st.title("📅 Gestionnaire de Cycle V24")
 
 with st.sidebar:
-    st.header("⚙️ Profil de Repos")
-    days_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    
-    st.session_state.repos_pair = st.multiselect("Repos (Semaine Paire)", days_list, default=['Saturday', 'Sunday'])
-    st.session_state.repos_impair = st.multiselect("Repos (Semaine Impaire)", days_list, default=['Monday', 'Saturday'])
+    st.header("⚙️ Configuration")
+    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    rp = st.multiselect("Repos Semaine PAIRE", days, default=['Saturday', 'Sunday'])
+    ri = st.multiselect("Repos Semaine IMPAIRE", days, default=['Monday', 'Saturday'])
     
     st.markdown("---")
-    st.header("📅 Période")
-    today = datetime.now()
-    d_range = st.date_input("Choisir les dates", [today, today + timedelta(days=60)])
+    dates = st.date_input("Période", [datetime.now(), datetime.now() + timedelta(days=30)])
 
-# Zone de saisie des congés
-col_input, col_stats = st.columns([2, 1])
+col_l, col_r = st.columns([1, 2])
 
-with col_input:
-    st.subheader("➕ Poser un jour de congé (CX)")
-    cx_date = st.date_input("Date du congé", key="picker")
-    c1, c2 = st.columns(2)
-    if c1.button("Ajouter le Congé"):
-        if cx_date not in st.session_state.selected_cx:
-            st.session_state.selected_cx.append(cx_date)
+with col_l:
+    st.subheader("Action")
+    new_cx = st.date_input("Ajouter un congé (CX)")
+    if st.button("Valider le congé"):
+        if new_cx not in st.session_state.selected_cx:
+            st.session_state.selected_cx.append(new_cx)
             st.rerun()
-    if c2.button("🗑️ Vider tout"):
+    if st.button("Réinitialiser"):
         st.session_state.selected_cx = []
         st.rerun()
 
-# Calcul du DataFrame
-if len(d_range) == 2:
-    dates = pd.date_range(d_range[0], d_range[1])
-    df_base = pd.DataFrame({'Date': dates})
-    df_result = apply_v24_logic(df_base)
-
-    # Affichage des statistiques
-    with col_stats:
-        st.subheader("📊 Bilan")
-        total_cx = len(st.session_state.selected_cx)
-        total_cz = len(df_result[df_result['Type'] == "CZ"])
-        st.metric("Congés posés (CX)", total_cx)
-        st.metric("Taxe prélevée (CZ)", total_cz, delta="-1 jour", delta_color="inverse")
-        st.write(f"**Total débité : {total_cx + total_cz} jours**")
-
-    # Affichage du tableau final
-    st.markdown("---")
+if len(dates) == 2:
+    df_calc = pd.DataFrame({'Date': pd.date_range(dates[0], dates[1])})
+    df_res = apply_v24_logic(df_calc, rp, ri)
     
-    # Formatage pour l'affichage
-    df_display = df_result.copy()
-    df_display['Jour'] = df_display['Date'].dt.strftime('%d/%m/%Y (%a)')
-    df_display = df_display[['Jour', 'Label']]
+    with col_r:
+        st.subheader("Planning")
+        def style_df(row):
+            return [f'background-color: {row.Color}; color: black'] * len(row)
+        
+        display_df = df_res[['Date', 'Label']].copy()
+        display_df['Date'] = display_df['Date'].dt.strftime('%d/%m (%a)')
+        st.table(display_df.style.apply(style_df, axis=1))
 
-    def color_row(row):
-        # On récupère la couleur depuis le dataframe d'origine
-        color = df_result.loc[row.name, 'Color']
-        return [f'background-color: {color}; color: black'] * len(row)
-
-    st.table(df_display.style.apply(color_row, axis=1))
+    # Stats
+    st.divider()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("CX Posés", len(st.session_state.selected_cx))
+    c2.metric("Taxes CZ", len(df_res[df_res['Type'] == "CZ"]))
+    c3.metric("Total Débité", len(st.session_state.selected_cx) + len(df_res[df_res['Type'] == "CZ"]))
