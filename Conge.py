@@ -3,9 +3,9 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="Vincent Opti V36 - FC Priorité ZZ", layout="wide")
+st.set_page_config(page_title="OPTICX31/39", layout="wide")
 
-# --- STYLE VISUEL ---
+# --- STYLE VISUEL (FLASH) ---
 st.markdown("""
     <style>
     .bg-zz { background-color: #00FF00 !important; color: black !important; border: 2px solid #000; } 
@@ -14,11 +14,15 @@ st.markdown("""
     .bg-c4 { background-color: #A000FF !important; color: white !important; border: 2px solid #000; } 
     .bg-cz { background-color: #FF0000 !important; color: white !important; border: 2px solid #000; }
     .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
+    
     .day-card { border-radius: 10px; padding: 10px; min-height: 140px; text-align: center; box-shadow: 4px 4px 0px #222; margin-bottom: 5px; display: flex; flex-direction: column; justify-content: center; }
     .date-num { font-size: 2.5rem; font-weight: 900; line-height: 1; }
     .status-code { font-size: 1.4rem; font-weight: 900; margin-top: 5px; }
+    
     .metric-box { background: #222; color: #00FF00; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #00FF00; }
     .metric-box h1 { font-size: 3rem; margin: 0; }
+    
+    .main-title { font-size: 4rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -29,43 +33,32 @@ if 'cal_map' not in st.session_state:
 jours_noms = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
 # --- FONCTIONS LOGIQUES ---
-
 def is_holiday(date):
     feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
     return (date.day, date.month) in feries
 
 def get_theo_status(date, off_i, off_p):
-    """Détermine le statut théorique (TRA, ZZ ou FC)"""
     if is_holiday(date): return "FC"
     week_num = date.isocalendar()[1]
     repos_prevus = off_p if week_num % 2 == 0 else off_i
     return "ZZ" if jours_noms[date.weekday()] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
-    """
-    RÈGLE V36 : 
-    - Un FC qui tombe sur un ZZ habituel compte comme un repos pour le déclenchement (seuil de 3).
-    """
     cz_days = set()
     curr = start_view - timedelta(days=start_view.weekday())
     while curr <= end_view:
         week_dates = [curr + timedelta(days=i) for i in range(7)]
-        
-        # COMPTEUR DE REPOS (ZZ théoriques + FC tombant sur un ZZ théorique)
         nb_repos_trigger = 0
         for d in week_dates:
             week_num = d.isocalendar()[1]
             repos_cycle = off_p if week_num % 2 == 0 else off_i
-            # Si le jour est un repos dans le cycle (qu'il soit FC ou ZZ après)
             if jours_noms[d.weekday()] in repos_cycle:
                 nb_repos_trigger += 1
         
-        # DÉCLENCHEMENT DU CZ
         if nb_repos_trigger >= 3:
             actual_states = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week_dates]
             if "CX" in actual_states and "C4" not in actual_states:
                 for d in week_dates:
-                    # On transforme le premier repos trouvé (ZZ ou FC) en CZ
                     status_actuel = current_map.get(d, get_theo_status(d, off_i, off_p))
                     if status_actuel in ["ZZ", "FC"]:
                         cz_days.add(d)
@@ -75,7 +68,7 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ PARAMÈTRES")
+    st.header("⚙️ CONFIGURATION")
     off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Lundi", "Samedi"])
     off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Lundi", "Mardi", "Samedi"])
     
@@ -93,11 +86,9 @@ with st.sidebar:
         while curr_opt <= d_end:
             temp_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
             if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)) >= quota_limit: break
-            
             if get_theo_status(curr_opt, off_i, off_p) == "TRA":
                 if c4_used < c4_limit:
-                    st.session_state.cal_map[curr_opt] = "C4"
-                    c4_used += 1
+                    st.session_state.cal_map[curr_opt] = "C4"; c4_used += 1
                 else:
                     st.session_state.cal_map[curr_opt] = "CX"
                     if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))) > quota_limit:
@@ -105,9 +96,20 @@ with st.sidebar:
             curr_opt += timedelta(days=1)
         st.rerun()
 
-    if st.button("🗑️ RESET", use_container_width=True):
+    if st.button("🗑️ RÉINITIALISER", use_container_width=True):
         st.session_state.cal_map = {}
         st.rerun()
+
+# --- HEADER & NOTICE ---
+st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
+
+with st.expander("ℹ️ NOTICE D'UTILISATION"):
+    st.info("""
+    - **Le CZ (Rouge)** se déclenche si la semaine a **3 repos cycliques** (ZZ).
+    - Un **Férié (FC)** ne compte comme repos que s'il tombe sur un de vos ZZ habituels.
+    - Le **C4 (Violet)** protège la semaine de l'apparition d'un CZ.
+    - Toutes les cases sont modifiables manuellement.
+    """)
 
 # --- CALCULS D'AFFICHAGE ---
 mois_affichage = sorted(list(set([(d_start.year, d_start.month), (d_end.year, d_end.month)])))
@@ -122,16 +124,15 @@ cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
 decompte = nb_cx + len(cz_totaux)
 
-# --- GRILLE ---
-st.title("🛡️ VINCENT OPTI - V36")
-
+# --- COMPTEURS ---
 c1, c2, c3 = st.columns(3)
 with c1: 
     color = "#FF0000" if decompte > quota_limit else "#00FF00"
-    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1>DÉCOMPTÉ</div>', unsafe_allow_html=True)
-with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>ABSENCE</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1>QUOTA</div>', unsafe_allow_html=True)
+with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>JOURS</div>', unsafe_allow_html=True)
 with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte}</h1>GAIN</div>', unsafe_allow_html=True)
 
+# --- GRILLE CALENDRIER ---
 for yr, mo in mois_affichage:
     st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
     cols_h = st.columns(7)
@@ -148,11 +149,8 @@ for yr, mo in mois_affichage:
             
             with cols[i]:
                 st.markdown(f'<div class="day-card bg-{display.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
-                
                 opts = ["TRA", "ZZ", "CX", "C4", "FC"]
                 if user_val not in opts: user_val = "TRA"
-                
-                # SÉLECTEUR AVEC CLÉ UNIQUE DATE
                 selection = st.selectbox("Action", opts, index=opts.index(user_val), key=f"s_{d.isoformat()}", label_visibility="collapsed")
                 if selection != user_val:
                     st.session_state.cal_map[d] = selection
