@@ -3,34 +3,47 @@ import pandas as pd
 import holidays
 from datetime import datetime, timedelta
 
-# --- CONFIGURATION DE LA PAGE ---
+# --- 1. INITIALISATION DES ÉTATS (Sécurité Streamlit Cloud) ---
+if 'repos_pair' not in st.session_state:
+    st.session_state.repos_pair = ['Saturday', 'Sunday']
+if 'repos_impair' not in st.session_state:
+    st.session_state.repos_impair = ['Saturday', 'Sunday']
+if 'selected_cx' not in st.session_state:
+    st.session_state.selected_cx = []
+
+# --- 2. CONFIGURATION DE LA PAGE ---
 st.set_page_config(layout="wide", page_title="OptiCongés V24", page_icon="📅")
 
-# --- LOGIQUE MÉTIER ---
+# --- 3. LOGIQUE MÉTIER ---
 
 def get_holiday_name(date):
+    """Récupère le nom du jour férié français s'il existe."""
     fr_holidays = holidays.France(years=date.year)
     return fr_holidays.get(date)
 
 def get_is_even(date):
+    """Vérifie si la semaine ISO est paire."""
     return date.isocalendar()[1] % 2 == 0
 
 def apply_v24_logic(df):
     """
-    Applique la transformation ZZ -> CZ (Forfait 5 jours)
-    et gère la rupture du RAT (V24).
+    Applique la cascade de priorités :
+    1. Férié (FC) - Jaune
+    2. Repos (ZZ) - Vert
+    3. Congé (CX) - Bleu
+    4. Forfait (CZ) - Rouge (Si >= 3 repos + 1 CX, sauf si V24 brise la règle)
     """
     df['Type'] = "TRAVAIL"
-    df['Color'] = "#ffffff" # Blanc par défaut
+    df['Label'] = "Travail"
+    df['Color'] = "#ffffff"
     
-    # 1. Marquage initial (Fériés et Repos Théoriques)
+    # Étape A : Marquage des bases (Fériés et Repos selon Profil)
     for i, row in df.iterrows():
         d = row['Date']
         is_even = get_is_even(d)
         day_name = d.strftime('%A')
         holiday = get_holiday_name(d)
         
-        # Repos théorique selon profil
         repos_config = st.session_state.repos_pair if is_even else st.session_state.repos_impair
         
         if holiday:
@@ -39,117 +52,109 @@ def apply_v24_logic(df):
             df.at[i, 'Color'] = "#f1c40f" # Jaune
         elif day_name in repos_config:
             df.at[i, 'Type'] = "ZZ"
-            df.at[i, 'Label'] = "Repos"
+            df.at[i, 'Label'] = "Repos (ZZ)"
             df.at[i, 'Color'] = "#2ecc71" # Vert
             
-    # 2. Injection des Congés (CX) posés par l'utilisateur
+    # Étape B : Injection des Congés (CX) manuels
     for d_cx in st.session_state.selected_cx:
-        idx = df[df['Date'] == d_cx].index
+        # On convertit en datetime pour la comparaison
+        d_cx_dt = pd.to_datetime(d_cx)
+        idx = df[df['Date'] == d_cx_dt].index
         if not idx.empty:
             df.at[idx[0], 'Type'] = "CX"
-            df.at[idx[0], 'Label'] = "Congé Payé"
+            df.at[idx[0], 'Label'] = "Congé Payé (CX)"
             df.at[idx[0], 'Color'] = "#3498db" # Bleu
 
-    # 3. Règle du Forfait & V24 (Analyse par semaine ISO)
-    for (year, week), week_data in df.groupby([df['Date'].dt.year, df['Date'].dt.isocalendar().week]):
+    # Étape C : La Règle du Forfait (Transformation ZZ -> CZ)
+    # Analyse par bloc de semaine ISO
+    df['Week'] = df['Date'].dt.isocalendar().week
+    df['Year'] = df['Date'].dt.isocalendar().year
+    
+    for (y, w), week_data in df.groupby(['Year', 'Week']):
         indices = week_data.index
-        # Compter les repos (ZZ ou FC tombant sur un repos théorique)
-        # Note : Un FC est prioritaire à l'affichage mais compte comme un repos pour le calcul du quota
+        # On compte les jours de "repos" au sens large (ZZ + FC)
         repos_count = len(week_data[week_data['Type'].isin(['ZZ', 'FC'])])
         has_cx = (week_data['Type'] == 'CX').any()
         
-        # Condition Forfait : >= 3 repos ET au moins 1 CX
+        # Condition Forfait : 3 repos minimum et au moins 1 jour de congé posé
         if repos_count >= 3 and has_cx:
-            # Recherche de la rupture V24 : 
-            # Si la semaine se termine par ZZ -> ZZ -> CX -> RAT(Travail)
-            # On vérifie si les derniers jours empêchent la taxe
+            # --- Règle V24 (Rupture du forfait) ---
+            # Si la semaine finit par CX puis Travail (RAT), on peut potentiellement casser le forfait
             is_v24_broken = False
-            last_days = week_data['Type'].tolist()
-            # Simple simulation de la règle de rupture V24
-            if len(last_days) >= 3 and last_days[-1] == "TRAVAIL" and last_days[-2] == "CX":
-                 is_v24_broken = True
+            types_list = week_data['Type'].tolist()
+            if len(types_list) >= 2:
+                if types_list[-1] == "TRAVAIL" and types_list[-2] == "CX":
+                    is_v24_broken = True
             
             if not is_v24_broken:
-                # Transformer le PREMIER ZZ de la semaine en CZ (Rouge)
+                # Transformer le PREMIER ZZ disponible en CZ (Taxe)
                 zz_indices = week_data[week_data['Type'] == 'ZZ'].index
                 if not zz_indices.empty:
-                    df.at[zz_indices[0], 'Type'] = "CZ"
-                    df.at[zz_indices[0], 'Label'] = "Taxe Forfait (CZ)"
-                    df.at[zz_indices[0], 'Color'] = "#e74c3c" # Rouge
+                    target_idx = zz_indices[0]
+                    df.at[target_idx, 'Type'] = "CZ"
+                    df.at[target_idx, 'Label'] = "Forfait (CZ)"
+                    df.at[target_idx, 'Color'] = "#e74c3c" # Rouge
 
     return df
 
-# --- INTERFACE STREAMLIT ---
+# --- 4. INTERFACE UTILISATEUR ---
 
-st.title("📅 Optimiseur de Congés - Système V24")
-st.markdown("---")
+st.title("🚀 Optimiseur de Cycle - Règle V24")
+st.info("Priorités : Férié (Jaune) > Forfait (Rouge) > Congé (Bleu) > Repos (Vert)")
 
-# Sidebar : Configuration des profils
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Profil de Repos")
     days_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     
-    st.subheader("Semaine PAIRE")
-    st.session_state.repos_pair = st.multiselect("Repos fixes (P)", days_list, default=['Saturday', 'Sunday'], key="p_repos")
-    
-    st.subheader("Semaine IMPAIRE")
-    st.session_state.repos_impair = st.multiselect("Repos fixes (I)", days_list, default=['Saturday', 'Sunday'], key="i_repos")
+    st.session_state.repos_pair = st.multiselect("Repos (Semaine Paire)", days_list, default=['Saturday', 'Sunday'])
+    st.session_state.repos_impair = st.multiselect("Repos (Semaine Impaire)", days_list, default=['Monday', 'Saturday'])
     
     st.markdown("---")
-    date_range = st.date_input("Période d'analyse", [datetime.now(), datetime.now() + timedelta(days=30)])
-    
-    if 'selected_cx' not in st.session_state:
-        st.session_state.selected_cx = []
+    st.header("📅 Période")
+    today = datetime.now()
+    d_range = st.date_input("Choisir les dates", [today, today + timedelta(days=60)])
 
-# Main Layout
-col1, col2 = st.columns([1, 3])
+# Zone de saisie des congés
+col_input, col_stats = st.columns([2, 1])
 
-with col1:
-    st.subheader("🛠️ Poser des congés")
-    new_cx = st.date_input("Choisir une date de CX", key="cx_picker")
-    if st.button("Ajouter le CX"):
-        if new_cx not in st.session_state.selected_cx:
-            st.session_state.selected_cx.append(new_cx)
-    
-    if st.button("Réinitialiser"):
+with col_input:
+    st.subheader("➕ Poser un jour de congé (CX)")
+    cx_date = st.date_input("Date du congé", key="picker")
+    c1, c2 = st.columns(2)
+    if c1.button("Ajouter le Congé"):
+        if cx_date not in st.session_state.selected_cx:
+            st.session_state.selected_cx.append(cx_date)
+            st.rerun()
+    if c2.button("🗑️ Vider tout"):
         st.session_state.selected_cx = []
         st.rerun()
 
-    st.write("**Congés posés :**", len(st.session_state.selected_cx))
+# Calcul du DataFrame
+if len(d_range) == 2:
+    dates = pd.date_range(d_range[0], d_range[1])
+    df_base = pd.DataFrame({'Date': dates})
+    df_result = apply_v24_logic(df_base)
 
-with col2:
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-        dates = pd.date_range(start_date, end_date)
-        df_cal = pd.DataFrame({'Date': dates})
-        
-        # Application du moteur de règles
-        df_final = apply_v24_logic(df_cal)
-        
-        # Affichage visuel (Tableau stylisé)
-        st.subheader("🗓️ Visualisation du Cycle")
-        
-        def color_cells(row):
-            return [f'background-color: {row.Color}; color: black' for _ in row]
+    # Affichage des statistiques
+    with col_stats:
+        st.subheader("📊 Bilan")
+        total_cx = len(st.session_state.selected_cx)
+        total_cz = len(df_result[df_result['Type'] == "CZ"])
+        st.metric("Congés posés (CX)", total_cx)
+        st.metric("Taxe prélevée (CZ)", total_cz, delta="-1 jour", delta_color="inverse")
+        st.write(f"**Total débité : {total_cx + total_cz} jours**")
 
-        # Ajout des badges DJT / RAT (Simulation simple sur le bloc)
-        # On marque le début et la fin de la période de repos
-        
-        styled_df = df_final[['Date', 'Type', 'Label']].copy()
-        styled_df['Date'] = styled_df['Date'].dt.strftime('%d/%m/%Y (%a)')
-        
-        st.table(df_final.style.apply(color_cells, axis=1))
+    # Affichage du tableau final
+    st.markdown("---")
+    
+    # Formatage pour l'affichage
+    df_display = df_result.copy()
+    df_display['Jour'] = df_display['Date'].dt.strftime('%d/%m/%Y (%a)')
+    df_display = df_display[['Jour', 'Label']]
 
-# --- RÉSUMÉ DES COMPTEURS ---
-st.markdown("---")
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Total Congés (CX)", len(st.session_state.selected_cx))
-with c2:
-    count_cz = len(df_final[df_final['Type'] == "CZ"])
-    st.metric("Taxe Forfait (CZ)", count_cz, delta_color="inverse")
-with c3:
-    total_off = len(df_final[df_final['Type'].isin(['ZZ', 'CX', 'CZ', 'FC'])])
-    st.metric("Jours de Repos Réels", total_off)
+    def color_row(row):
+        # On récupère la couleur depuis le dataframe d'origine
+        color = df_result.loc[row.name, 'Color']
+        return [f'background-color: {color}; color: black'] * len(row)
 
-st.info("💡 **Rappel V24** : Si vous reprenez le travail (RAT) juste après un bloc de repos incluant un CX, vérifiez que la séquence casse bien le forfait 5 jours.")
+    st.table(df_display.style.apply(color_row, axis=1))
