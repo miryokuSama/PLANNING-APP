@@ -3,9 +3,9 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="Vincent Opti V35 - Règle FC Fixée", layout="wide")
+st.set_page_config(page_title="Vincent Opti V36 - FC Priorité ZZ", layout="wide")
 
-# --- STYLE VISUEL (FLASH) ---
+# --- STYLE VISUEL ---
 st.markdown("""
     <style>
     .bg-zz { background-color: #00FF00 !important; color: black !important; border: 2px solid #000; } 
@@ -30,36 +30,44 @@ jours_noms = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dima
 
 # --- FONCTIONS LOGIQUES ---
 
-def get_theo_status(date, off_i, off_p):
+def is_holiday(date):
     feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
-    if (date.day, date.month) in feries: return "FC"
+    return (date.day, date.month) in feries
+
+def get_theo_status(date, off_i, off_p):
+    """Détermine le statut théorique (TRA, ZZ ou FC)"""
+    if is_holiday(date): return "FC"
     week_num = date.isocalendar()[1]
     repos_prevus = off_p if week_num % 2 == 0 else off_i
     return "ZZ" if jours_noms[date.weekday()] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
     """
-    RÈGLE V35 : 
-    - Seuls les 'ZZ' comptent pour le seuil des 3 repos.
-    - Les 'FC' sont ignorés dans le calcul du déclenchement.
+    RÈGLE V36 : 
+    - Un FC qui tombe sur un ZZ habituel compte comme un repos pour le déclenchement (seuil de 3).
     """
     cz_days = set()
     curr = start_view - timedelta(days=start_view.weekday())
     while curr <= end_view:
         week_dates = [curr + timedelta(days=i) for i in range(7)]
         
-        # 1. On compte UNIQUEMENT les ZZ théoriques (Les FC ne comptent pas)
-        theo_states = [get_theo_status(d, off_i, off_p) for d in week_dates]
-        nb_zz_uniquement = sum(1 for s in theo_states if s == "ZZ")
+        # COMPTEUR DE REPOS (ZZ théoriques + FC tombant sur un ZZ théorique)
+        nb_repos_trigger = 0
+        for d in week_dates:
+            week_num = d.isocalendar()[1]
+            repos_cycle = off_p if week_num % 2 == 0 else off_i
+            # Si le jour est un repos dans le cycle (qu'il soit FC ou ZZ après)
+            if jours_noms[d.weekday()] in repos_cycle:
+                nb_repos_trigger += 1
         
-        # 2. Le CZ ne se déclenche que si il y a au moins 3 ZZ
-        if nb_zz_uniquement >= 3:
+        # DÉCLENCHEMENT DU CZ
+        if nb_repos_trigger >= 3:
             actual_states = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week_dates]
-            # Si un CX est présent et AUCUN C4 ne protège la semaine
             if "CX" in actual_states and "C4" not in actual_states:
                 for d in week_dates:
-                    # Le CZ se pose sur le premier ZZ de la semaine
-                    if current_map.get(d, get_theo_status(d, off_i, off_p)) == "ZZ":
+                    # On transforme le premier repos trouvé (ZZ ou FC) en CZ
+                    status_actuel = current_map.get(d, get_theo_status(d, off_i, off_p))
+                    if status_actuel in ["ZZ", "FC"]:
                         cz_days.add(d)
                         break
         curr += timedelta(days=7)
@@ -84,8 +92,7 @@ with st.sidebar:
         curr_opt, c4_used = d_start, 0
         while curr_opt <= d_end:
             temp_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-            current_cost = sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)
-            if current_cost >= quota_limit: break
+            if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)) >= quota_limit: break
             
             if get_theo_status(curr_opt, off_i, off_p) == "TRA":
                 if c4_used < c4_limit:
@@ -93,10 +100,8 @@ with st.sidebar:
                     c4_used += 1
                 else:
                     st.session_state.cal_map[curr_opt] = "CX"
-                    new_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-                    if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(new_cz)) > quota_limit:
-                        del st.session_state.cal_map[curr_opt]
-                        break
+                    if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))) > quota_limit:
+                        del st.session_state.cal_map[curr_opt]; break
             curr_opt += timedelta(days=1)
         st.rerun()
 
@@ -110,27 +115,27 @@ if len(mois_affichage) < 2:
     m, y = (d_start.month + 1, d_start.year) if d_start.month < 12 else (1, d_start.year + 1)
     mois_affichage.append((y, m))
 
-view_start = datetime(mois_affichage[0][0], mois_affichage[0][1], 1).date()
-view_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=10)
+v_start = datetime(mois_affichage[0][0], mois_affichage[0][1], 1).date()
+v_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=10)
 
-cz_totaux = calculate_cz(st.session_state.cal_map, view_start, view_end, off_i, off_p)
+cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-decompte_total = nb_cx + len(cz_totaux)
+decompte = nb_cx + len(cz_totaux)
 
 # --- GRILLE ---
-st.title("🛡️ OPTIMISEUR VINCENT V35")
+st.title("🛡️ VINCENT OPTI - V36")
 
 c1, c2, c3 = st.columns(3)
 with c1: 
-    color = "#FF0000" if decompte_total > quota_limit else "#00FF00"
-    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte_total}/{quota_limit}</h1>DÉCOMPTÉ</div>', unsafe_allow_html=True)
+    color = "#FF0000" if decompte > quota_limit else "#00FF00"
+    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1>DÉCOMPTÉ</div>', unsafe_allow_html=True)
 with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>ABSENCE</div>', unsafe_allow_html=True)
-with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte_total}</h1>GAIN</div>', unsafe_allow_html=True)
+with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte}</h1>GAIN</div>', unsafe_allow_html=True)
 
 for yr, mo in mois_affichage:
     st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
     cols_h = st.columns(7)
-    for idx, name in enumerate(jours_noms): cols_h[idx].caption(name)
+    for idx, n in enumerate(jours_noms): cols_h[idx].caption(n)
     
     for week in calendar.Calendar(firstweekday=0).monthdatescalendar(yr, mo):
         cols = st.columns(7)
@@ -139,27 +144,16 @@ for yr, mo in mois_affichage:
             
             user_val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
             is_cz = d in cz_totaux
-            display_status = "CZ" if is_cz else user_val
+            display = "CZ" if is_cz else user_val
             
             with cols[i]:
-                st.markdown(f"""
-                    <div class="day-card bg-{display_status.lower()}">
-                        <div class="date-num">{d.day}</div>
-                        <div class="status-code">{display_status}</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="day-card bg-{display.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
                 
-                options = ["TRA", "ZZ", "CX", "C4", "FC"]
-                if user_val not in options: user_val = "TRA"
+                opts = ["TRA", "ZZ", "CX", "C4", "FC"]
+                if user_val not in opts: user_val = "TRA"
                 
-                # SÉLECTEUR AVEC CLÉ UNIQUE (INDISPENSABLE POUR LE MULTI-MOIS)
-                selection = st.selectbox(
-                    "Action", options, 
-                    index=options.index(user_val), 
-                    key=f"sel_{d.isoformat()}", 
-                    label_visibility="collapsed"
-                )
-                
+                # SÉLECTEUR AVEC CLÉ UNIQUE DATE
+                selection = st.selectbox("Action", opts, index=opts.index(user_val), key=f"s_{d.isoformat()}", label_visibility="collapsed")
                 if selection != user_val:
                     st.session_state.cal_map[d] = selection
                     st.rerun()
