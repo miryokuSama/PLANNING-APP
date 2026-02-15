@@ -2,7 +2,7 @@ import streamlit as st
 import calendar
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Optimiseur Vincent V30 - FC Protégé", layout="wide")
+st.set_page_config(page_title="Optimiseur Vincent V29.1 - Reversion Stable", layout="wide")
 
 # --- 1. STYLE CSS COMPLET (FLASH & CONTRASTE) ---
 st.markdown("""
@@ -39,8 +39,7 @@ if 'cal_map' not in st.session_state:
 jours_complets = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
 def get_theoretical_status(date, o_i, o_p):
-    # Liste des jours fériés
-    f = {(1,1):"An",(1,5):"1er Mai",(8,5):"8 Mai",(14,5):"Asc.",(25,5):"Pent.",(14,7):"F.Nat.",(15,8):"Ass.",(1,11):"Touss.",(11,11):"Arm.",(25,12):"Noël"}
+    f = {(1,1):"FC",(1,5):"FC",(8,5):"FC",(14,5):"FC",(25,5):"FC",(14,7):"FC",(15,8):"FC",(1,11):"FC",(11,11):"FC",(25,12):"FC"}
     if f.get((date.day, date.month)): return "FC"
     wn = date.isocalendar()[1]
     off_list = o_p if wn % 2 == 0 else o_i
@@ -52,30 +51,18 @@ def compute_cz_internal(temp_map, start, end, o_i, o_p):
     while curr_w <= end + timedelta(days=7):
         wn = curr_w.isocalendar()[1]
         off_list_theo = o_p if wn % 2 == 0 else o_i
-        
-        # On compte les jours de "repos" théoriques (ZZ + FC)
-        week_dates = [curr_w + timedelta(days=i) for i in range(7)]
-        week_repos_count = 0
-        for dt in week_dates:
-            st_theo = get_theoretical_status(dt, o_i, o_p)
-            if st_theo in ["ZZ", "FC"]:
-                week_repos_count += 1
-        
-        # RÈGLE : Si la semaine a minimum 3 jours de repos (ZZ ou FC)
-        if week_repos_count >= 3:
+        if len(off_list_theo) >= 3:
+            week_dates = [curr_w + timedelta(days=i) for i in range(7)]
             states = [temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) for dt in week_dates]
-            # Si un CX est posé et qu'aucun C4 ne protège la semaine
             if "CX" in states and "C4" not in states:
-                # On cherche un ZZ uniquement (Le FC est protégé !)
                 for dt in week_dates:
-                    current_st = temp_map.get(dt, get_theoretical_status(dt, o_i, o_p))
-                    if current_st == "ZZ": # Changement ici : uniquement ZZ
-                        cz_days.add(dt)
-                        break
+                    # Retour à la logique V29 : ZZ ou FC peuvent devenir CZ
+                    if temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) in ["ZZ", "FC"]:
+                        cz_days.add(dt); break
         curr_w += timedelta(days=7)
     return cz_days
 
-# --- 3. BARRE LATÉRALE ---
+# --- 3. BARRE LATÉRALE (PARAMÈTRES ET ACTIONS) ---
 with st.sidebar:
     st.title("⚙️ RÉGLAGES")
     off_impair = st.multiselect("Repos IMPAIRS", jours_complets, default=["Lundi", "Samedi"])
@@ -119,7 +106,7 @@ with st.sidebar:
             new_map[curr] = "CX"
             cz_check = compute_cz_internal(new_map, d_start, d_end, off_impair, off_pair)
             if (sum(1 for v in new_map.values() if v == "CX") + len(cz_check)) > quota_max:
-                del new_map[curr]
+                del new_map[curr] # On retire le dernier pour rester sous le quota
                 break
             curr += timedelta(days=1)
         st.session_state.cal_map = new_map
@@ -129,7 +116,7 @@ with st.sidebar:
         st.session_state.cal_map = {}
         st.rerun()
 
-# --- 4. CALCULS ---
+# --- 4. CALCULS ET COMPTEURS ---
 cz_active_days = compute_cz_internal(st.session_state.cal_map, d_start, d_end, off_impair, off_pair)
 cx_posés = sum(1 for d, v in st.session_state.cal_map.items() if v == "CX" and d_start <= d <= d_end)
 cz_count = len([d for d in cz_active_days if d_start <= d <= d_end])
@@ -137,8 +124,8 @@ conges_consommes = cx_posés + cz_count
 absence_totale = (d_end - d_start).days + 1
 gain = absence_totale - conges_consommes
 
-# --- 5. AFFICHAGE MÉTRIQUES ---
-st.title("🛡️ OPTIMISEUR VINCENT V30")
+# --- 5. AFFICHAGE DES MÉTRIQUES ---
+st.title("🛡️ OPTIMISEUR VINCENT V29.1")
 
 c1, c2, c3 = st.columns(3)
 with c1: 
@@ -161,7 +148,8 @@ mois_a_afficher = sorted(list(set([(d.year, d.month) for d in dates_p])))
 for year, month in mois_a_afficher:
     st.markdown(f"## 🗓️ {calendar.month_name[month].upper()} {year}")
     cols_h = st.columns(7)
-    for idx, j_nom in enumerate(jours_complets): cols_h[idx].caption(j_nom)
+    for idx, j_nom in enumerate(jours_complets):
+        cols_h[idx].caption(j_nom)
     
     cal = calendar.Calendar(firstweekday=0)
     for week in cal.monthdatescalendar(year, month):
@@ -190,3 +178,5 @@ for year, month in mois_a_afficher:
                     if new_val != status:
                         st.session_state.cal_map[d] = new_val
                         st.rerun()
+                else:
+                    st.write("")
