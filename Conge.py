@@ -2,7 +2,7 @@ import streamlit as st
 import calendar
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Optimiseur Vincent V29.1 - Reversion Stable", layout="wide")
+st.set_page_config(page_title="Optimiseur Vincent V29.2 - Multi-Mois", layout="wide")
 
 # --- 1. STYLE CSS COMPLET (FLASH & CONTRASTE) ---
 st.markdown("""
@@ -48,6 +48,7 @@ def get_theoretical_status(date, o_i, o_p):
 def compute_cz_internal(temp_map, start, end, o_i, o_p):
     cz_days = set()
     curr_w = start - timedelta(days=start.weekday())
+    # On balaie un peu plus large pour ne rien rater
     while curr_w <= end + timedelta(days=7):
         wn = curr_w.isocalendar()[1]
         off_list_theo = o_p if wn % 2 == 0 else o_i
@@ -56,21 +57,20 @@ def compute_cz_internal(temp_map, start, end, o_i, o_p):
             states = [temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) for dt in week_dates]
             if "CX" in states and "C4" not in states:
                 for dt in week_dates:
-                    # Retour à la logique V29 : ZZ ou FC peuvent devenir CZ
                     if temp_map.get(dt, get_theoretical_status(dt, o_i, o_p)) in ["ZZ", "FC"]:
                         cz_days.add(dt); break
         curr_w += timedelta(days=7)
     return cz_days
 
-# --- 3. BARRE LATÉRALE (PARAMÈTRES ET ACTIONS) ---
+# --- 3. BARRE LATÉRALE ---
 with st.sidebar:
-    st.title("⚙️ RÉGLAGES")
+    st.title("⚙️ CONFIGURATION")
     off_impair = st.multiselect("Repos IMPAIRS", jours_complets, default=["Lundi", "Samedi"])
     off_pair = st.multiselect("Repos PAIRS", jours_complets, default=["Lundi", "Mardi", "Samedi"])
     
     st.divider()
-    d_start = st.date_input("Début période", datetime(2026, 5, 1))
-    d_end = st.date_input("Fin période", datetime(2026, 5, 31))
+    d_start = st.date_input("Début de période", datetime(2026, 5, 1))
+    d_end = st.date_input("Fin de période", datetime(2026, 5, 15)) # Exemple courte durée
     
     st.divider()
     st.subheader("📊 QUOTAS")
@@ -106,7 +106,7 @@ with st.sidebar:
             new_map[curr] = "CX"
             cz_check = compute_cz_internal(new_map, d_start, d_end, off_impair, off_pair)
             if (sum(1 for v in new_map.values() if v == "CX") + len(cz_check)) > quota_max:
-                del new_map[curr] # On retire le dernier pour rester sous le quota
+                del new_map[curr]
                 break
             curr += timedelta(days=1)
         st.session_state.cal_map = new_map
@@ -125,7 +125,7 @@ absence_totale = (d_end - d_start).days + 1
 gain = absence_totale - conges_consommes
 
 # --- 5. AFFICHAGE DES MÉTRIQUES ---
-st.title("🛡️ OPTIMISEUR VINCENT V29.1")
+st.title("🛡️ OPTIMISEUR VINCENT V29.2")
 
 c1, c2, c3 = st.columns(3)
 with c1: 
@@ -137,14 +137,29 @@ with c3:
     st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{gain}</h1>JOURS GAGNÉS</div>', unsafe_allow_html=True)
 
 if conges_consommes > quota_max:
-    st.markdown(f'<div class="quota-alert">⚠️ QUOTA DÉPASSÉ ! ({conges_consommes - quota_max} jour(s) de trop)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="quota-alert">⚠️ QUOTA DÉPASSÉ !</div>', unsafe_allow_html=True)
 
 st.divider()
 
-# --- 6. GRILLE CALENDRIER ---
+# --- 6. LOGIQUE D'AFFICHAGE MULTI-MOIS (MINIMUM 2) ---
+# On calcule les mois de la période
+mois_selectionnes = set([(d_start.year, d_start.month)])
 dates_p = [d_start + timedelta(days=i) for i in range((d_end - d_start).days + 1)]
-mois_a_afficher = sorted(list(set([(d.year, d.month) for d in dates_p])))
+for d in dates_p:
+    mois_selectionnes.add((d.year, d.month))
 
+# On force l'ajout du mois suivant le dernier mois sélectionné s'il n'y en a qu'un
+if len(mois_selectionnes) < 2:
+    dernier_mois = max(mois_selectionnes)
+    # Calcul du mois suivant
+    if dernier_mois[1] == 12:
+        mois_selectionnes.add((dernier_mois[0] + 1, 1))
+    else:
+        mois_selectionnes.add((dernier_mois[0], dernier_mois[1] + 1))
+
+mois_a_afficher = sorted(list(mois_selectionnes))
+
+# --- 7. GRILLE CALENDRIER ---
 for year, month in mois_a_afficher:
     st.markdown(f"## 🗓️ {calendar.month_name[month].upper()} {year}")
     cols_h = st.columns(7)
