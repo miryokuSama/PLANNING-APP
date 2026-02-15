@@ -3,7 +3,7 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="Vincent Opti V34", layout="wide")
+st.set_page_config(page_title="Vincent Opti V35 - Règle FC Fixée", layout="wide")
 
 # --- STYLE VISUEL (FLASH) ---
 st.markdown("""
@@ -31,7 +31,6 @@ jours_noms = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dima
 # --- FONCTIONS LOGIQUES ---
 
 def get_theo_status(date, off_i, off_p):
-    """Renvoie le statut théorique (Repos ou Travail)"""
     feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
     if (date.day, date.month) in feries: return "FC"
     week_num = date.isocalendar()[1]
@@ -39,24 +38,28 @@ def get_theo_status(date, off_i, off_p):
     return "ZZ" if jours_noms[date.weekday()] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
-    """Calcule les CZ selon la règle : Semaine avec >= 3 repos + présence CX + absence C4"""
+    """
+    RÈGLE V35 : 
+    - Seuls les 'ZZ' comptent pour le seuil des 3 repos.
+    - Les 'FC' sont ignorés dans le calcul du déclenchement.
+    """
     cz_days = set()
-    # On commence au lundi de la première semaine visible
     curr = start_view - timedelta(days=start_view.weekday())
     while curr <= end_view:
         week_dates = [curr + timedelta(days=i) for i in range(7)]
-        # 1. Combien de repos théoriques (ZZ ou FC) cette semaine ?
-        theo_repos = [get_theo_status(d, off_i, off_p) for d in week_dates]
-        nb_repos = sum(1 for s in theo_repos if s in ["ZZ", "FC"])
         
-        if nb_repos >= 3:
-            # 2. Quels sont les statuts réels (modifiés par l'utilisateur) ?
+        # 1. On compte UNIQUEMENT les ZZ théoriques (Les FC ne comptent pas)
+        theo_states = [get_theo_status(d, off_i, off_p) for d in week_dates]
+        nb_zz_uniquement = sum(1 for s in theo_states if s == "ZZ")
+        
+        # 2. Le CZ ne se déclenche que si il y a au moins 3 ZZ
+        if nb_zz_uniquement >= 3:
             actual_states = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week_dates]
-            # 3. Règle du CZ : Si CX présent ET aucun C4
+            # Si un CX est présent et AUCUN C4 ne protège la semaine
             if "CX" in actual_states and "C4" not in actual_states:
                 for d in week_dates:
-                    # Le CZ prend la place du premier repos (ZZ ou FC) trouvé
-                    if current_map.get(d, get_theo_status(d, off_i, off_p)) in ["ZZ", "FC"]:
+                    # Le CZ se pose sur le premier ZZ de la semaine
+                    if current_map.get(d, get_theo_status(d, off_i, off_p)) == "ZZ":
                         cz_days.add(d)
                         break
         curr += timedelta(days=7)
@@ -80,7 +83,6 @@ with st.sidebar:
         st.session_state.cal_map = {}
         curr_opt, c4_used = d_start, 0
         while curr_opt <= d_end:
-            # Vérif Quota avant action
             temp_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
             current_cost = sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)
             if current_cost >= quota_limit: break
@@ -91,7 +93,6 @@ with st.sidebar:
                     c4_used += 1
                 else:
                     st.session_state.cal_map[curr_opt] = "CX"
-                    # Si ce CX génère un CZ qui dépasse le quota, on annule
                     new_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
                     if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(new_cz)) > quota_limit:
                         del st.session_state.cal_map[curr_opt]
@@ -103,8 +104,7 @@ with st.sidebar:
         st.session_state.cal_map = {}
         st.rerun()
 
-# --- CALCULS POUR AFFICHAGE ---
-# Définir les mois à afficher (minimum 2)
+# --- CALCULS D'AFFICHAGE ---
 mois_affichage = sorted(list(set([(d_start.year, d_start.month), (d_end.year, d_end.month)])))
 if len(mois_affichage) < 2:
     m, y = (d_start.month + 1, d_start.year) if d_start.month < 12 else (1, d_start.year + 1)
@@ -115,11 +115,10 @@ view_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + t
 
 cz_totaux = calculate_cz(st.session_state.cal_map, view_start, view_end, off_i, off_p)
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-nb_cz = len(cz_totaux)
-decompte_total = nb_cx + nb_cz
+decompte_total = nb_cx + len(cz_totaux)
 
-# --- GRILLE PRINCIPALE ---
-st.title("🛡️ OPTIMISEUR VINCENT V34")
+# --- GRILLE ---
+st.title("🛡️ OPTIMISEUR VINCENT V35")
 
 c1, c2, c3 = st.columns(3)
 with c1: 
@@ -138,13 +137,11 @@ for yr, mo in mois_affichage:
         for i, d in enumerate(week):
             if d.month != mo: continue
             
-            # Statut final
             user_val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
             is_cz = d in cz_totaux
             display_status = "CZ" if is_cz else user_val
             
             with cols[i]:
-                # Case visuelle
                 st.markdown(f"""
                     <div class="day-card bg-{display_status.lower()}">
                         <div class="date-num">{d.day}</div>
@@ -152,10 +149,10 @@ for yr, mo in mois_affichage:
                     </div>
                 """, unsafe_allow_html=True)
                 
-                # Menu de choix (Clé unique par date)
                 options = ["TRA", "ZZ", "CX", "C4", "FC"]
                 if user_val not in options: user_val = "TRA"
                 
+                # SÉLECTEUR AVEC CLÉ UNIQUE (INDISPENSABLE POUR LE MULTI-MOIS)
                 selection = st.selectbox(
                     "Action", options, 
                     index=options.index(user_val), 
