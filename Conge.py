@@ -3,31 +3,46 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39 - V41", layout="wide")
+st.set_page_config(page_title="OPTICX31/39 - V42", layout="wide")
 
-# --- STYLE VISUEL ---
+# --- STYLE VISUEL (CORRIGÉ) ---
 st.markdown("""
     <style>
-    .bg-zz { background-color: #00FF00 !important; color: black !important; border: 2px solid #000; } 
-    .bg-fc { background-color: #FFFF00 !important; color: black !important; border: 2px solid #000; } 
-    .bg-cx { background-color: #0070FF !important; color: white !important; border: 2px solid #000; } 
-    .bg-c4 { background-color: #A000FF !important; color: white !important; border: 2px solid #000; } 
-    .bg-cz { background-color: #FF0000 !important; color: white !important; border: 2px solid #000; }
-    .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
-    
-    .day-container {
-        border-radius: 10px; padding: 10px; min-height: 150px; text-align: center;
-        box-shadow: 3px 3px 0px #222; margin-bottom: 10px;
-        display: flex; flex-direction: column; justify-content: center; align-items: center;
+    /* Couleurs de fond pour les colonnes */
+    [data-testid="column"] {
+        border-radius: 10px;
+        padding: 5px;
+        text-align: center;
     }
-    .date-num { font-size: 2.2rem; font-weight: 900; line-height: 1; }
-    .status-code { font-size: 1.1rem; font-weight: 900; margin-top: 5px; }
+    .stSelectbox div { margin-top: -10px; }
     
-    .badge-djt { background-color: #FF6600; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-bottom: 5px; }
-    .badge-rat { background-color: #00FFFF; color: black; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-bottom: 5px; }
+    .metric-box { 
+        background: #222; 
+        color: #00FF00; 
+        padding: 20px; 
+        border-radius: 15px; 
+        text-align: center; 
+        border: 3px solid #00FF00; 
+    }
+    .main-title { 
+        font-size: 3.5rem; 
+        font-weight: 900; 
+        color: #0070FF; 
+        text-align: center; 
+        border-bottom: 5px solid #0070FF; 
+        margin-bottom: 20px; 
+    }
     
-    .metric-box { background: #222; color: #00FF00; padding: 20px; border-radius: 15px; text-align: center; border: 3px solid #00FF00; }
-    .main-title { font-size: 3.5rem; font-weight: 900; color: #0070FF; text-align: center; border-bottom: 5px solid #0070FF; margin-bottom: 20px; }
+    /* Couleurs de texte pour les statuts */
+    .txt-zz { color: #00FF00; font-weight: 900; }
+    .txt-fc { color: #FFFF00; font-weight: 900; }
+    .txt-cx { color: #0070FF; font-weight: 900; }
+    .txt-c4 { color: #A000FF; font-weight: 900; }
+    .txt-cz { color: #FF0000; font-weight: 900; }
+    .txt-tra { color: #888; font-weight: 400; }
+    
+    .badge-djt { background-color: #FF6600; color: white; border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; }
+    .badge-rat { background-color: #00FFFF; color: black; border-radius: 4px; padding: 2px 5px; font-size: 0.7rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -90,15 +105,13 @@ with st.sidebar:
         st.rerun()
     if st.button("🗑️ RESET"): st.session_state.cal_map = {}; st.rerun()
 
-# --- CALCUL BORNES ---
+# --- CALCULS BORNES ---
 cz_global = calculate_cz(st.session_state.cal_map, d_start - timedelta(days=31), d_end + timedelta(days=31), off_i, off_p)
 
-# DJT
 djt = d_start - timedelta(days=1)
 while st.session_state.cal_map.get(djt, get_theo_status(djt, off_i, off_p)) != "TRA" and djt not in cz_global:
     djt -= timedelta(days=1)
 
-# RAT
 rat = d_end + timedelta(days=1)
 while st.session_state.cal_map.get(rat, get_theo_status(rat, off_i, off_p)) != "TRA" and rat not in cz_global:
     rat += timedelta(days=1)
@@ -109,40 +122,39 @@ total_tunnel = (rat - djt).days - 1
 
 # --- AFFICHAGE ---
 st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
-c1, c2 = st.columns(2)
-c1.markdown(f'<div class="metric-box"><div class="metric-label">QUOTA</div><h1>{nb_cx+len(cz_u)}/{quota_limit}</h1></div>', unsafe_allow_html=True)
-c2.markdown(f'<div class="metric-box"><div class="metric-label">REPOS CONSECUTIFS</div><h1>{total_tunnel}</h1></div>', unsafe_allow_html=True)
+col_m1, col_m2 = st.columns(2)
+col_m1.markdown(f'<div class="metric-box"><small>QUOTA UTILISÉ</small><h1>{nb_cx+len(cz_u)}/{quota_limit}</h1></div>', unsafe_allow_html=True)
+col_m2.markdown(f'<div class="metric-box"><small>REPOS CONSÉCUTIFS</small><h1>{total_tunnel}</h1></div>', unsafe_allow_html=True)
 
 mois = sorted(list(set([(djt.year, djt.month), (rat.year, rat.month)])))
 for yr, mo in mois:
-    st.subheader(f"🗓️ {calendar.month_name[mo].upper()} {yr}")
-    cols = st.columns(7)
-    for i, n in enumerate(jours_noms): cols[i].caption(n)
+    st.write(f"### {calendar.month_name[mo].upper()} {yr}")
+    
+    # En-tête des jours
+    cols_h = st.columns(7)
+    for i, n in enumerate(jours_noms):
+        cols_h[i].caption(n)
     
     for week in calendar.Calendar(calendar.SUNDAY).monthdatescalendar(yr, mo):
-        grid = st.columns(7)
+        cols = st.columns(7)
         for i, d in enumerate(week):
-            if d.month != mo: continue
+            if d.month != mo:
+                continue
             
             val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
             stat = "CZ" if d in cz_global else val
             
-            # Construction sécurisée du HTML
-            badge = ""
-            if d == djt: badge = '<div class="badge-djt">DJT</div>'
-            if d == rat: badge = '<div class="badge-rat">RAT</div>'
-            
-            with grid[i]:
-                # On utilise st.markdown avec unsafe_allow_html=True pour TOUT le bloc
-                st.markdown(f"""
-                <div class="day-container bg-{stat.lower()}">
-                    {badge}
-                    <div class="date-num">{d.day}</div>
-                    <div class="status-code">{stat}</div>
-                </div>
-                """, unsafe_allow_html=True)
+            with cols[i]:
+                # Affichage des badges DJT/RAT
+                if d == djt: st.markdown('<div class="badge-djt">DJT</div>', unsafe_allow_html=True)
+                if d == rat: st.markdown('<div class="badge-rat">RAT</div>', unsafe_allow_html=True)
                 
-                new_v = st.selectbox("m", ["TRA","ZZ","CX","C4","FC"], 
+                # Le numéro et le statut avec une classe CSS de couleur
+                st.markdown(f"**{d.day}**")
+                st.markdown(f'<span class="txt-{stat.lower()}">{stat}</span>', unsafe_allow_html=True)
+                
+                # Le sélecteur
+                new_v = st.selectbox("mod", ["TRA","ZZ","CX","C4","FC"], 
                                      index=["TRA","ZZ","CX","C4","FC"].index(val), 
                                      key=f"k{d}", label_visibility="collapsed")
                 if new_v != val:
