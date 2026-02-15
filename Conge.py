@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION PAGE ---
 st.set_page_config(page_title="OPTICX31/39", layout="wide")
 
-# --- STYLE VISUEL (FLASH) ---
+# --- STYLE VISUEL ---
 st.markdown("""
     <style>
     .bg-zz { background-color: #00FF00 !important; color: black !important; border: 2px solid #000; } 
@@ -14,14 +14,11 @@ st.markdown("""
     .bg-c4 { background-color: #A000FF !important; color: white !important; border: 2px solid #000; } 
     .bg-cz { background-color: #FF0000 !important; color: white !important; border: 2px solid #000; }
     .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
-    
     .day-card { border-radius: 10px; padding: 10px; min-height: 140px; text-align: center; box-shadow: 4px 4px 0px #222; margin-bottom: 5px; display: flex; flex-direction: column; justify-content: center; }
     .date-num { font-size: 2.5rem; font-weight: 900; line-height: 1; }
     .status-code { font-size: 1.4rem; font-weight: 900; margin-top: 5px; }
-    
     .metric-box { background: #222; color: #00FF00; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #00FF00; }
     .metric-box h1 { font-size: 3rem; margin: 0; }
-    
     .main-title { font-size: 4rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
     </style>
 """, unsafe_allow_html=True)
@@ -30,7 +27,8 @@ st.markdown("""
 if 'cal_map' not in st.session_state:
     st.session_state.cal_map = {}
 
-jours_noms = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+# On définit le dimanche en premier (Index 0 pour le calendrier Dimanche-Samedi)
+jours_noms = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
 
 # --- FONCTIONS LOGIQUES ---
 def is_holiday(date):
@@ -41,18 +39,22 @@ def get_theo_status(date, off_i, off_p):
     if is_holiday(date): return "FC"
     week_num = date.isocalendar()[1]
     repos_prevus = off_p if week_num % 2 == 0 else off_i
-    return "ZZ" if jours_noms[date.weekday()] in repos_prevus else "TRA"
+    return "ZZ" if jours_noms[ (date.weekday() + 1) % 7 ] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
     cz_days = set()
-    curr = start_view - timedelta(days=start_view.weekday())
+    # Début au dimanche précédent
+    delta_dimanche = (start_view.weekday() + 1) % 7
+    curr = start_view - timedelta(days=delta_dimanche)
+    
     while curr <= end_view:
         week_dates = [curr + timedelta(days=i) for i in range(7)]
         nb_repos_trigger = 0
         for d in week_dates:
             week_num = d.isocalendar()[1]
             repos_cycle = off_p if week_num % 2 == 0 else off_i
-            if jours_noms[d.weekday()] in repos_cycle:
+            # Index ajusté pour faire correspondre le nom du jour avec jours_noms
+            if jours_noms[(d.weekday() + 1) % 7] in repos_cycle:
                 nb_repos_trigger += 1
         
         if nb_repos_trigger >= 3:
@@ -66,16 +68,20 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
         curr += timedelta(days=7)
     return cz_days
 
-# --- SIDEBAR ---
+# --- SIDEBAR & SYNCHRO DATES ---
 with st.sidebar:
     st.header("⚙️ CONFIGURATION")
-    off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Lundi", "Samedi"])
-    off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Lundi", "Mardi", "Samedi"])
+    off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Dimanche", "Lundi"])
+    off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Dimanche", "Lundi", "Samedi"])
     
     st.divider()
-    d_start = st.date_input("Début absence", datetime(2026, 5, 1))
-    d_end = st.date_input("Fin absence", datetime(2026, 5, 20))
+    # Logique de synchro auto : d_start influence la valeur par défaut de d_end
+    d_start = st.date_input("Début absence", datetime(2026, 5, 10))
+    d_end = st.date_input("Fin absence", value=d_start) # J+0 automatique
     
+    if d_end < d_start:
+        st.error("La fin ne peut pas être avant le début.")
+
     st.divider()
     quota_limit = st.number_input("Quota Max (CX+CZ)", value=17)
     c4_limit = st.number_input("Nb C4 dispos", value=2)
@@ -96,22 +102,14 @@ with st.sidebar:
             curr_opt += timedelta(days=1)
         st.rerun()
 
-    if st.button("🗑️ RÉINITIALISER", use_container_width=True):
+    if st.button("🗑️ RESET", use_container_width=True):
         st.session_state.cal_map = {}
         st.rerun()
 
-# --- HEADER & NOTICE ---
+# --- HEADER ---
 st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
 
-with st.expander("ℹ️ NOTICE D'UTILISATION"):
-    st.info("""
-    - **Le CZ (Rouge)** se déclenche si la semaine a **3 repos cycliques** (ZZ).
-    - Un **Férié (FC)** ne compte comme repos que s'il tombe sur un de vos ZZ habituels.
-    - Le **C4 (Violet)** protège la semaine de l'apparition d'un CZ.
-    - Toutes les cases sont modifiables manuellement.
-    """)
-
-# --- CALCULS D'AFFICHAGE ---
+# --- CALCULS ---
 mois_affichage = sorted(list(set([(d_start.year, d_start.month), (d_end.year, d_end.month)])))
 if len(mois_affichage) < 2:
     m, y = (d_start.month + 1, d_start.year) if d_start.month < 12 else (1, d_start.year + 1)
@@ -124,7 +122,7 @@ cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
 decompte = nb_cx + len(cz_totaux)
 
-# --- COMPTEURS ---
+# --- DASHBOARD ---
 c1, c2, c3 = st.columns(3)
 with c1: 
     color = "#FF0000" if decompte > quota_limit else "#00FF00"
@@ -132,13 +130,14 @@ with c1:
 with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>JOURS</div>', unsafe_allow_html=True)
 with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte}</h1>GAIN</div>', unsafe_allow_html=True)
 
-# --- GRILLE CALENDRIER ---
+# --- CALENDRIER (START SUNDAY) ---
 for yr, mo in mois_affichage:
     st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
     cols_h = st.columns(7)
     for idx, n in enumerate(jours_noms): cols_h[idx].caption(n)
     
-    for week in calendar.Calendar(firstweekday=0).monthdatescalendar(yr, mo):
+    # calendar.SUNDAY définit le début de semaine dans l'itérateur
+    for week in calendar.Calendar(firstweekday=calendar.SUNDAY).monthdatescalendar(yr, mo):
         cols = st.columns(7)
         for i, d in enumerate(week):
             if d.month != mo: continue
