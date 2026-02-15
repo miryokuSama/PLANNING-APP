@@ -3,7 +3,7 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="Vincent Opti V36 - FC Priorité ZZ", layout="wide")
+st.set_page_config(page_title="AIDE POSE CX CYCLE 31/39 - FC Priorité ZZ", layout="wide")
 
 # --- STYLE VISUEL ---
 st.markdown("""
