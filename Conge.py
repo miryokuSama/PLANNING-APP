@@ -2,7 +2,7 @@ import streamlit as st
 import calendar
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Optimiseur Vincent V14", layout="wide")
+st.set_page_config(page_title="Optimiseur Vincent V15", layout="wide")
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -21,7 +21,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🛡️ Planificateur Vincent (Correction Fériés/CZ)")
+st.title("🛡️ Planificateur Vincent (Logique Férié Sélective)")
 
 # --- 1. CONFIGURATION ---
 with st.expander("👤 1. CONFIGURATION DE VOTRE CYCLE DE REPOS", expanded=True):
@@ -49,7 +49,6 @@ with st.expander("📅 2. RÉGLAGES DE LA PÉRIODE", expanded=True):
 
 # --- LOGIQUE MÉTIER ---
 def check_ferie(date):
-    # Liste des fériés 2026
     f = {(1, 1): "An", (1, 5): "1er Mai", (8, 5): "8 Mai", (14, 5): "Asc.", (25, 5): "Pent.", (14, 7): "F.Nat.", (15, 8): "Assompt.", (1, 11): "Touss.", (11, 11): "Arm.", (25, 12): "Noël"}
     return f.get((date.day, date.month))
 
@@ -59,9 +58,9 @@ def get_day_status(date, off_imp, off_pair):
     jours_fr_map = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
     day_name_fr = jours_fr_map[date.weekday()]
     
-    label_ferie = check_ferie(date)
     current_off_list = off_pair if is_even else off_imp
     is_zz = day_name_fr in current_off_list
+    label_ferie = check_ferie(date)
     
     if label_ferie: return "FC", label_ferie
     if is_zz: return "ZZ", "REPOS ZZ"
@@ -79,24 +78,23 @@ def run_simulation(start, end, max_cx, off_i, off_p):
             cx_s.add(curr)
             conso += 1
             
-            # RÈGLE CZ : Semaine à 3 repos (paire ou impair selon ton réglage)
+            # ANALYSE DE LA SEMAINE POUR CZ
             is_even = wn % 2 == 0
             current_off_list = off_p if is_even else off_i
             
+            # La règle : 3 jours de repos théoriques dans le cycle (ZZ habituels)
             if len(current_off_list) >= 3 and wn not in weeks_taxed and conso < max_cx:
-                # On cherche un repos à taxer dans la semaine
-                start_w = curr - timedelta(days=(curr.weekday() + 1) % 7)
-                taxed = False
+                # On cherche à taxer un CZ sur un jour qui est théoriquement un repos
+                start_w = curr - timedelta(days=(curr.weekday() + 1) % 7) # Dimanche
                 for i in range(7):
                     day_to_check = start_w + timedelta(days=i)
-                    # MODIFICATION ICI : On regarde si c'est un jour de repos habituel, 
-                    # même si c'est un jour férié (FC)
                     day_name_fr = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][day_to_check.weekday()]
+                    
+                    # On taxe seulement si c'est un jour de repos habituel (ZZ théorique)
                     if day_name_fr in current_off_list:
                         cz_s.add(day_to_check)
                         conso += 1
                         weeks_taxed.add(wn)
-                        taxed = True
                         break
         curr += timedelta(days=1)
     return cx_s, cz_s, conso
@@ -105,7 +103,6 @@ def run_simulation(start, end, max_cx, off_i, off_p):
 if calculer:
     cx_final, cz_final, total = run_simulation(d_debut, d_fin, quota, off_impair, off_pair)
     
-    # Génération des mois
     mes_mois = []
     curr_m = d_debut.replace(day=1)
     while curr_m <= d_fin.replace(day=1):
@@ -117,6 +114,7 @@ if calculer:
         st.markdown(f'<div class="month-title">{calendar.month_name[m]} {y}</div>', unsafe_allow_html=True)
         cal = calendar.Calendar(firstweekday=6)
         month_days = list(cal.itermonthdates(y, m))
+        jours_fr = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"]
         for w in range(len(month_days)//7):
             cols = st.columns(7)
             for i in range(7):
@@ -134,5 +132,5 @@ if calculer:
                         elif st_code=="FC": bg="bg-fc"; tag=f'<div class="label-tag bg-fc">{st_lbl}</div>'
                         elif st_code=="ZZ": bg="bg-zz"; tag='<div class="label-tag bg-zz">REPOS ZZ</div>'
                         
-                        st.markdown(f'<div class="day-card {bg}"><div class="day-name">{["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"][i]}</div><div class="date-num">{d.day}</div>{tag}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="day-card {bg}"><div class="day-name">{jours_fr[i]}</div><div class="date-num">{d.day}</div>{tag}</div>', unsafe_allow_html=True)
     st.info(f"📊 Total décompté : {total} jours.")
