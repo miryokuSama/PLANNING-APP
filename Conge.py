@@ -2,7 +2,7 @@ import streamlit as st
 import calendar
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Optimiseur Vincent V15", layout="wide")
+st.set_page_config(page_title="Optimiseur Vincent V16", layout="wide")
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -21,116 +21,107 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🛡️ Planificateur Vincent (Logique Férié Sélective)")
+st.title("🛡️ Planificateur Vincent (Version Finale)")
 
 # --- 1. CONFIGURATION ---
-with st.expander("👤 1. CONFIGURATION DE VOTRE CYCLE DE REPOS", expanded=True):
+with st.expander("👤 1. CONFIGURATION DU CYCLE", expanded=True):
     jours_semaine = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    c_opt1, c_opt2 = st.columns(2)
-    with c_opt1:
-        off_impair = st.multiselect("Repos Semaines IMPAIRES", jours_semaine, default=["Lundi", "Samedi"], key="imp")
-    with c_opt2:
-        off_pair = st.multiselect("Repos Semaines PAIRES", jours_semaine, default=["Lundi", "Mardi", "Samedi"], key="pair")
+    c1, c2 = st.columns(2)
+    with c1: off_impair = st.multiselect("Repos Semaines IMPAIRES", jours_semaine, default=["Lundi", "Samedi"])
+    with c2: off_pair = st.multiselect("Repos Semaines PAIRES", jours_semaine, default=["Lundi", "Mardi", "Samedi"])
 
 # --- 2. RÉGLAGES ---
 mode = st.radio("Objectif :", ["Pose simple", "Optimiser mes repos"], horizontal=True)
 
-with st.expander("📅 2. RÉGLAGES DE LA PÉRIODE", expanded=True):
-    col_d1, col_d2, col_q = st.columns([2, 2, 1])
-    if mode == "Pose simple":
-        with col_d1: d_debut = st.date_input("Du", datetime(2026, 5, 1))
-        with col_d2: d_fin = st.date_input("Au", datetime(2026, 5, 31))
-    else:
-        with col_d1: d_debut = st.date_input("Début recherche", datetime(2026, 5, 1))
-        with col_d2: d_fin = st.date_input("Fin recherche", datetime(2026, 8, 31))
-    with col_q: quota = st.number_input("Quota CX", value=10)
-    
+with st.expander("📅 2. PÉRIODE ET QUOTA", expanded=True):
+    col_a, col_b, col_c = st.columns([2, 2, 1])
+    with col_a: d_debut_in = st.date_input("Du / Début recherche", datetime(2026, 5, 1))
+    with col_b: d_fin_in = st.date_input("Au / Fin recherche", datetime(2026, 6, 30))
+    with col_c: quota_val = st.number_input("Quota CX", value=10)
     calculer = st.button("🚀 LANCER", use_container_width=True)
 
-# --- LOGIQUE MÉTIER ---
-def check_ferie(date):
-    f = {(1, 1): "An", (1, 5): "1er Mai", (8, 5): "8 Mai", (14, 5): "Asc.", (25, 5): "Pent.", (14, 7): "F.Nat.", (15, 8): "Assompt.", (1, 11): "Touss.", (11, 11): "Arm.", (25, 12): "Noël"}
-    return f.get((date.day, date.month))
-
-def get_day_status(date, off_imp, off_pair):
+# --- FONCTIONS ---
+def get_day_status(date, off_i, off_p):
+    f = {(1,1):"An",(1,5):"1er Mai",(8,5):"8 Mai",(14,5):"Asc.",(25,5):"Pent.",(14,7):"F.Nat.",(15,8):"Assompt.",(1,11):"Touss.",(11,11):"Arm.",(25,12):"Noël"}
     wn = date.isocalendar()[1]
-    is_even = wn % 2 == 0
-    jours_fr_map = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    day_name_fr = jours_fr_map[date.weekday()]
-    
-    current_off_list = off_pair if is_even else off_imp
-    is_zz = day_name_fr in current_off_list
-    label_ferie = check_ferie(date)
-    
-    if label_ferie: return "FC", label_ferie
-    if is_zz: return "ZZ", "REPOS ZZ"
+    day_name = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"][date.weekday()]
+    off_list = off_p if wn % 2 == 0 else off_i
+    if f.get((date.day, date.month)): return "FC", f.get((date.day, date.month))
+    if day_name in off_list: return "ZZ", "REPOS ZZ"
     return "TRA", "TRAVAILLÉ"
 
-def run_simulation(start, end, max_cx, off_i, off_p):
-    cx_s, cz_s, weeks_taxed = set(), set(), set()
+def run_sim(start, end, max_cx, off_i, off_p):
+    cx_s, cz_s, weeks_t = set(), set(), set()
     conso = 0
     curr = start
     while curr <= end:
-        status, _ = get_day_status(curr, off_i, off_p)
+        s, _ = get_day_status(curr, off_i, off_p)
         wn = curr.isocalendar()[1]
-        
-        if status == "TRA" and conso < max_cx:
-            cx_s.add(curr)
-            conso += 1
-            
-            # ANALYSE DE LA SEMAINE POUR CZ
-            is_even = wn % 2 == 0
-            current_off_list = off_p if is_even else off_i
-            
-            # La règle : 3 jours de repos théoriques dans le cycle (ZZ habituels)
-            if len(current_off_list) >= 3 and wn not in weeks_taxed and conso < max_cx:
-                # On cherche à taxer un CZ sur un jour qui est théoriquement un repos
-                start_w = curr - timedelta(days=(curr.weekday() + 1) % 7) # Dimanche
+        if s == "TRA" and conso < max_cx:
+            cx_s.add(curr); conso += 1
+            off_list = off_p if wn % 2 == 0 else off_i
+            if len(off_list) >= 3 and wn not in weeks_t and conso < max_cx:
+                sw = curr - timedelta(days=(curr.weekday() + 1) % 7)
                 for i in range(7):
-                    day_to_check = start_w + timedelta(days=i)
-                    day_name_fr = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][day_to_check.weekday()]
-                    
-                    # On taxe seulement si c'est un jour de repos habituel (ZZ théorique)
-                    if day_name_fr in current_off_list:
-                        cz_s.add(day_to_check)
-                        conso += 1
-                        weeks_taxed.add(wn)
-                        break
+                    d_check = sw + timedelta(days=i)
+                    d_name = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"][d_check.weekday()]
+                    if d_name in off_list:
+                        cz_s.add(d_check); conso += 1; weeks_t.add(wn); break
         curr += timedelta(days=1)
     return cx_s, cz_s, conso
 
-# --- AFFICHAGE ---
+# --- CALCUL ET AFFICHAGE ---
 if calculer:
-    cx_final, cz_final, total = run_simulation(d_debut, d_fin, quota, off_impair, off_pair)
-    
-    mes_mois = []
-    curr_m = d_debut.replace(day=1)
-    while curr_m <= d_fin.replace(day=1):
-        mes_mois.append((curr_m.month, curr_m.year))
-        if curr_m.month == 12: curr_m = curr_m.replace(year=curr_m.year+1, month=1)
-        else: curr_m = curr_m.replace(month=curr_m.month+1)
+    if mode == "Pose simple":
+        cx_final, cz_final, total = run_sim(d_debut_in, d_fin_in, quota_val, off_impair, off_pair)
+        d_view_start, d_view_end = d_debut_in, d_fin_in
+        st.info(f"📊 Bilan Pose Simple : **{total} jours** décomptés du quota.")
+    else:
+        # ALGORITHME D'OPTIMISATION
+        best_off, best_dates = 0, (d_debut_in, d_debut_in + timedelta(days=7))
+        for i in range((d_fin_in - d_debut_in).days - 5):
+            t_start = d_debut_in + timedelta(days=i)
+            # On simule jusqu'à épuisement du quota
+            temp_cx, temp_cz, temp_conso = set(), set(), 0
+            curr_t = t_start
+            while temp_conso < quota_val and curr_t <= d_fin_in:
+                s_t, _ = get_day_status(curr_t, off_impair, off_pair)
+                if s_t == "TRA":
+                    temp_conso += 1
+                    wn_t = curr_t.isocalendar()[1]
+                    off_l = off_pair if wn_t % 2 == 0 else off_impair
+                    if len(off_l) >= 3: temp_conso += 1 # On simplifie le coût CZ pour l'optimiseur
+                curr_t += timedelta(days=1)
+            
+            off_dur = (curr_t - t_start).days
+            if off_dur > best_off:
+                best_off = off_dur
+                best_dates = (t_start, curr_t - timedelta(days=1))
+        
+        cx_final, cz_final, total = run_sim(best_dates[0], best_dates[1], quota_val, off_impair, off_pair)
+        d_view_start, d_view_end = best_dates[0], best_dates[1]
+        st.success(f"💡 **OPTIMISATION RÉUSSIE** : Du **{d_view_start.strftime('%d/%m')}** au **{d_view_end.strftime('%d/%m')}**. Vous obtenez **{best_off} jours** de repos consécutifs avec seulement {quota_val} CX !")
 
-    for m, y in mes_mois:
-        st.markdown(f'<div class="month-title">{calendar.month_name[m]} {y}</div>', unsafe_allow_html=True)
-        cal = calendar.Calendar(firstweekday=6)
-        month_days = list(cal.itermonthdates(y, m))
-        jours_fr = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"]
+    # --- CALENDRIER ---
+    curr_m = d_view_start.replace(day=1)
+    while curr_m <= d_view_end.replace(day=1):
+        st.markdown(f'<div class="month-title">{calendar.month_name[curr_m.month]} {curr_m.year}</div>', unsafe_allow_html=True)
+        month_days = list(calendar.Calendar(firstweekday=6).itermonthdates(curr_m.year, curr_m.month))
         for w in range(len(month_days)//7):
             cols = st.columns(7)
             for i in range(7):
                 d = month_days[w*7+i]
                 with cols[i]:
-                    if d.month != m: st.markdown('<div class="day-card bg-empty"></div>', unsafe_allow_html=True)
+                    if d.month != curr_m.month: st.markdown('<div class="day-card bg-empty"></div>', unsafe_allow_html=True)
                     else:
                         st_code, st_lbl = get_day_status(d, off_impair, off_pair)
                         is_cx = any(c.year==d.year and c.month==d.month and c.day==d.day for c in cx_final)
                         is_cz = any(c.year==d.year and c.month==d.month and c.day==d.day for c in cz_final)
-                        
                         bg, tag = "", '<div class="tra-text">TRAVAILLÉ</div>'
                         if is_cx: bg="bg-cx"; tag='<div class="label-tag bg-cx">CONGÉ CX</div>'
                         elif is_cz: bg="bg-cz"; tag='<div class="label-tag bg-cz">CONGÉ CZ</div>'
                         elif st_code=="FC": bg="bg-fc"; tag=f'<div class="label-tag bg-fc">{st_lbl}</div>'
                         elif st_code=="ZZ": bg="bg-zz"; tag='<div class="label-tag bg-zz">REPOS ZZ</div>'
-                        
-                        st.markdown(f'<div class="day-card {bg}"><div class="day-name">{jours_fr[i]}</div><div class="date-num">{d.day}</div>{tag}</div>', unsafe_allow_html=True)
-    st.info(f"📊 Total décompté : {total} jours.")
+                        st.markdown(f'<div class="day-card {bg}"><div class="day-name">{["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"][i]}</div><div class="date-num">{d.day}</div>{tag}</div>', unsafe_allow_html=True)
+        if curr_m.month == 12: curr_m = curr_m.replace(year=curr_m.year+1, month=1)
+        else: curr_m = curr_m.replace(month=curr_m.month+1)
