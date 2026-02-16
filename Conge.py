@@ -2,7 +2,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39 - V47", layout="wide")
+st.set_page_config(page_title="OPTICX31/39 - V48", layout="wide")
 
 # --- STYLE VISUEL ---
 st.markdown("""
@@ -15,19 +15,17 @@ st.markdown("""
     .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
     
     .day-card { 
-        border-radius: 10px; padding: 10px; min-height: 100px; text-align: center; 
+        border-radius: 10px; padding: 10px; min-height: 90px; text-align: center; 
         box-shadow: 3px 3px 0px #222; margin-bottom: 5px; 
         display: flex; flex-direction: column; justify-content: center; 
     }
-    .date-num { font-size: 1.8rem; font-weight: 900; line-height: 1; }
-    .date-label { font-size: 0.9rem; font-weight: bold; margin-bottom: 5px; text-transform: uppercase; }
-    .status-code { font-size: 1.1rem; font-weight: 900; }
+    .date-num { font-size: 1.6rem; font-weight: 900; line-height: 1; }
+    .date-label { font-size: 0.8rem; font-weight: bold; margin-bottom: 3px; text-transform: uppercase; }
+    .status-code { font-size: 1rem; font-weight: 900; }
     
-    .metric-box { background: #222; color: #00FF00; padding: 20px; border-radius: 15px; text-align: center; border: 3px solid #00FF00; margin-bottom: 10px; }
-    .metric-box h1 { font-size: 3rem; margin: 0; }
-    
-    .info-repos { font-size: 1.4rem; color: #0070FF; font-weight: bold; text-align: center; padding: 15px; background: #E8F0FF; border: 2px solid #0070FF; border-radius: 15px; margin-bottom: 20px; }
-    .tag-borne { font-weight: 900; font-size: 1rem; text-align: center; display: block; margin-bottom: 5px;}
+    .metric-box { background: #222; color: #00FF00; padding: 15px; border-radius: 15px; text-align: center; border: 3px solid #00FF00; }
+    .info-repos { font-size: 1.3rem; color: #0070FF; font-weight: bold; text-align: center; padding: 10px; background: #E8F0FF; border: 2px solid #0070FF; border-radius: 10px; margin: 15px 0; }
+    .tag-borne { font-weight: 900; font-size: 0.9rem; text-align: center; display: block; height: 20px;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -37,37 +35,61 @@ if 'cal_map' not in st.session_state:
 
 jours_noms = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
 
-# --- FONCTIONS LOGIQUES ---
+# --- LOGIQUE CALENDRIER ---
+
+def get_sunday_start(d):
+    """Retourne le dimanche de la semaine correspondante à la date d."""
+    idx = (d.weekday() + 1) % 7 # Dimanche = 0
+    return d - timedelta(days=idx)
+
+def get_week_parity(d):
+    """Calcule la parité basée sur le numéro de semaine (ISO décalé pour dimanche)."""
+    # On utilise le jeudi de la semaine pour déterminer le numéro de semaine ISO
+    sun = get_sunday_start(d)
+    mid_week = sun + timedelta(days=3)
+    return "PAIRE" if mid_week.isocalendar()[1] % 2 == 0 else "IMPAIRE"
+
 def is_holiday(date):
     feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
     return (date.day, date.month) in feries
 
 def get_theo_status(date, off_i, off_p):
     if is_holiday(date): return "FC"
-    week_num = date.isocalendar()[1]
-    repos_prevus = off_p if week_num % 2 == 0 else off_i
-    return "ZZ" if jours_noms[(date.weekday() + 1) % 7] in repos_prevus else "TRA"
+    parity = get_week_parity(date)
+    repos_actifs = off_p if parity == "PAIRE" else off_i
+    nom_j = jours_noms[(date.weekday() + 1) % 7]
+    return "ZZ" if nom_j in repos_actifs else "TRA"
 
-def calculate_cz(current_map, start, end, off_i, off_p):
+def calculate_cz(current_map, start_date, end_date, off_i, off_p):
+    """
+    Règle : Si 3 repos (ZZ ou FC) dans la semaine (Dim-Sam) ET présence d'un CX, 
+    alors le premier ZZ ou FC devient CZ.
+    """
     cz_days = set()
-    # On élargit un peu pour capter les semaines complètes
-    delta = (start.weekday() + 1) % 7
-    curr = start - timedelta(days=delta)
-    while curr <= end:
+    # On commence au dimanche avant le début pour couvrir les semaines pleines
+    curr = get_sunday_start(start_date)
+    last_limit = end_date + timedelta(days=7)
+    
+    while curr <= last_limit:
         week = [curr + timedelta(days=i) for i in range(7)]
-        nb_trigger = 0
-        for d in week:
-            wk_num = d.isocalendar()[1]
-            rp = off_p if wk_num % 2 == 0 else off_i
-            if jours_noms[(d.weekday() + 1) % 7] in rp: nb_trigger += 1
+        nb_repos_theo = 0
+        has_cx = False
         
-        if nb_trigger >= 3:
-            actuals = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week]
-            if "CX" in actuals and "C4" not in actuals:
-                for d in week:
-                    st_val = current_map.get(d, get_theo_status(d, off_i, off_p))
-                    if st_val in ["ZZ", "FC"]:
-                        cz_days.add(d); break
+        for d in week:
+            # Statut actuel (Manuel > Théorique)
+            statut = current_map.get(d, get_theo_status(d, off_i, off_p))
+            # On compte les repos "naturels" (ZZ ou FC)
+            if get_theo_status(d, off_i, off_p) in ["ZZ", "FC"]:
+                nb_repos_theo += 1
+            if statut == "CX":
+                has_cx = True
+        
+        # Déclenchement CZ
+        if nb_repos_theo >= 3 and has_cx:
+            for d in week:
+                if get_theo_status(d, off_i, off_p) in ["ZZ", "FC"]:
+                    cz_days.add(d)
+                    break # Un seul CZ par semaine
         curr += timedelta(days=7)
     return cz_days
 
@@ -82,99 +104,113 @@ with st.sidebar:
     off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Dimanche", "Lundi", "Samedi"])
     d_start = st.date_input("Début absence", datetime(2026, 5, 10))
     d_end = st.date_input("Fin absence", value=d_start)
-    quota_limit = st.number_input("Quota Max", value=17)
-    c4_limit = st.number_input("Nb C4", value=2)
+    quota_limit = st.number_input("Quota Max (CX+CZ)", value=17)
+    c4_limit = st.number_input("C4 disponibles", value=2)
 
     if st.button("🚀 OPTIMISER", use_container_width=True):
         st.session_state.cal_map = {}
-        curr, c4_c = d_start, 0
+        curr, c4_used = d_start, 0
         while curr <= d_end:
-            if is_holiday(curr) or get_theo_status(curr, off_i, off_p) == "ZZ":
+            # On ne pose pas de CX sur un repos ou un férié
+            if get_theo_status(curr, off_i, off_p) in ["ZZ", "FC"]:
                 curr += timedelta(days=1); continue
-            cz_t = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-            if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(cz_t)) >= quota_limit: break
-            if c4_c < c4_limit: st.session_state.cal_map[curr] = "C4"; c4_c += 1
+            
+            # Calcul quota actuel
+            cz_temp = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
+            cx_count = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
+            
+            if (cx_count + len(cz_temp)) >= quota_limit: break
+            
+            if c4_used < c4_limit:
+                st.session_state.cal_map[curr] = "C4"; c4_used += 1
             else:
                 st.session_state.cal_map[curr] = "CX"
-                if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))) > quota_limit:
+                # Re-vérifier si ce CX n'a pas déclenché un CZ qui dépasse le quota
+                cz_check = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
+                if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(cz_check)) > quota_limit:
                     del st.session_state.cal_map[curr]; break
             curr += timedelta(days=1)
         st.rerun()
-    if st.button("🗑️ RESET", use_container_width=True): st.session_state.cal_map = {}; st.rerun()
+
+    if st.button("🗑️ RESET", use_container_width=True):
+        st.session_state.cal_map = {}
+        st.rerun()
 
 # --- CALCULS BORNES ---
-# On scanne pour trouver le DJT (TRA avant début)
-ptr_djt = d_start - timedelta(days=1)
-# On calcule les CZ sur un spectre large pour que les bornes soient justes
-cz_global = calculate_cz(st.session_state.cal_map, d_start - timedelta(days=45), d_end + timedelta(days=45), off_i, off_p)
+# On calcule les CZ sur une période large
+cz_global = calculate_cz(st.session_state.cal_map, d_start - timedelta(days=30), d_end + timedelta(days=30), off_i, off_p)
 
-while get_final_status(ptr_djt, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
-    ptr_djt -= timedelta(days=1)
-djt_date = ptr_djt
+# DJT : Dernier TRA avant
+ptr = d_start - timedelta(days=1)
+while get_final_status(ptr, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
+    ptr -= timedelta(days=1)
+djt_date = ptr
 
-# On scanne pour trouver le RAT (TRA après fin)
-ptr_rat = d_end + timedelta(days=1)
-while get_final_status(ptr_rat, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
-    ptr_rat += timedelta(days=1)
-rat_date = ptr_rat
+# RAT : Premier TRA après
+ptr = d_end + timedelta(days=1)
+while get_final_status(ptr, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
+    ptr += timedelta(days=1)
+rat_date = ptr
 
-# --- COMPTEURS ---
+# Stats
 total_repos = (rat_date - djt_date).days - 1
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-cz_periode = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-decompte = nb_cx + len(cz_periode)
+cz_count = len([d for d in cz_global if d_start <= d <= d_end or djt_date <= d <= rat_date])
+quota_final = nb_cx + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))
 
 # --- AFFICHAGE ---
-st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
+st.markdown('<h1 style="text-align:center; color:#0070FF;">OPTICX31/39 - V48</h1>', unsafe_allow_html=True)
 
-c_q = st.columns([1, 2, 1])[1]
-with c_q:
-    color = "#FF0000" if decompte > quota_limit else "#00FF00"
-    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1><div style="font-weight:bold;">QUOTA DÉCOMPTÉ</div></div>', unsafe_allow_html=True)
+c1, c2 = st.columns(2)
+with c1:
+    color = "#FF0000" if quota_final > quota_limit else "#00FF00"
+    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h3>QUOTA : {quota_final} / {quota_limit}</h3></div>', unsafe_allow_html=True)
+with c2:
+    st.markdown(f'<div class="metric-box" style="color:#00FFFF; border-color:#00FFFF;"><h3>CONGÉS : {total_repos} JOURS</h3></div>', unsafe_allow_html=True)
 
-st.markdown(f'<div class="info-repos">🏖️ Total : {total_repos} jours de repos entre le {djt_date.strftime("%d/%m")} et le {rat_date.strftime("%d/%m")}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="info-repos">Repos total entre le {djt_date.strftime("%d/%m")} (DJT) et le {rat_date.strftime("%d/%m")} (RAT)</div>', unsafe_allow_html=True)
 
-# --- GRILLE DES JOURS (DJT à RAT uniquement) ---
-st.write("### 📅 Période détaillée")
+# --- GRILLE D'AFFICHAGE (Par semaine Dimanche -> Samedi) ---
+curr_view = get_sunday_start(djt_date)
+end_view = rat_date
 
-# On génère la liste des dates à afficher
-dates_to_show = []
-curr = djt_date
-while curr <= rat_date:
-    dates_to_show.append(curr)
-    curr += timedelta(days=1)
-
-# Affichage par lignes de 7 jours pour la lisibilité
-for i in range(0, len(dates_to_show), 7):
+while curr_view <= end_view:
     cols = st.columns(7)
-    chunk = dates_to_show[i:i+7]
-    for idx, d in enumerate(chunk):
-        val_theo = get_theo_status(d, off_i, off_p)
-        val_actuelle = st.session_state.cal_map.get(d, val_theo)
-        is_cz = d in cz_global
-        display = "CZ" if is_cz else val_actuelle
+    for i in range(7):
+        d = curr_view + timedelta(days=i)
         
-        with cols[idx]:
-            # Badge DJT / RAT
-            if d == djt_date: st.markdown('<span class="tag-borne" style="color:#FF6600;">🟠 DJT</span>', unsafe_allow_html=True)
-            elif d == rat_date: st.markdown('<span class="tag-borne" style="color:#00FFFF;">🔵 RAT</span>', unsafe_allow_html=True)
-            else: st.markdown('<span class="tag-borne">&nbsp;</span>', unsafe_allow_html=True)
+        # On n'affiche la case que si elle est entre DJT et RAT inclus
+        if djt_date <= d <= rat_date:
+            val_theo = get_theo_status(d, off_i, off_p)
+            val_actuelle = st.session_state.cal_map.get(d, val_theo)
+            is_cz = d in cz_global
+            display = "CZ" if is_cz else val_actuelle
             
-            # Carte
-            nom_jour = jours_noms[(d.weekday() + 1) % 7]
-            st.markdown(f"""
-            <div class="day-card bg-{display.lower()}">
-                <div class="date-label">{nom_jour}</div>
-                <div class="date-num">{d.day}/{d.month}</div>
-                <div class="status-code">{display}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            with cols[i]:
+                # Borne DJT / RAT
+                if d == djt_date: st.markdown('<span class="tag-borne" style="color:#FF6600;">🟠 DJT</span>', unsafe_allow_html=True)
+                elif d == rat_date: st.markdown('<span class="tag-borne" style="color:#00FFFF;">🔵 RAT</span>', unsafe_allow_html=True)
+                else: st.markdown('<span class="tag-borne"></span>', unsafe_allow_html=True)
+                
+                # Carte
+                nom_j = jours_noms[i]
+                st.markdown(f"""
+                <div class="day-card bg-{display.lower()}">
+                    <div class="date-label">{nom_j}</div>
+                    <div class="date-num">{d.day}</div>
+                    <div class="status-code">{display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Menu
+                opts = ["TRA", "ZZ", "CX", "C4", "FC"]
+                idx = opts.index(val_actuelle) if val_actuelle in opts else 0
+                new_val = st.selectbox("mod", opts, index=idx, key=f"s_{d.isoformat()}", label_visibility="collapsed")
+                
+                if new_val != val_actuelle:
+                    st.session_state.cal_map[d] = new_val
+                    st.rerun()
+        else:
+            cols[i].write("") # Case vide pour l'alignement
             
-            # Menu de changement
-            opts = ["TRA", "ZZ", "CX", "C4", "FC"]
-            idx_sel = opts.index(val_actuelle) if val_actuelle in opts else 0
-            
-            choix = st.selectbox("Action", opts, index=idx_sel, key=f"sel_{d.isoformat()}", label_visibility="collapsed")
-            if choix != val_actuelle:
-                st.session_state.cal_map[d] = choix
-                st.rerun()
+    curr_view += timedelta(days=7)
