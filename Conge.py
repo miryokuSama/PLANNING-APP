@@ -3,7 +3,7 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39 - V39", layout="wide")
+st.set_page_config(page_title="OPTICX31/39 - V43", layout="wide")
 
 # --- STYLE VISUEL ---
 st.markdown("""
@@ -23,6 +23,8 @@ st.markdown("""
     .metric-box h1 { font-size: 4rem; margin: 0; }
     .metric-label { font-size: 1.2rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
     
+    .badge-borne { font-weight: bold; font-size: 1.2rem; margin-bottom: 5px; display: block;}
+    
     .main-title { font-size: 4rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
     </style>
 """, unsafe_allow_html=True)
@@ -39,14 +41,17 @@ def is_holiday(date):
     return (date.day, date.month) in feries
 
 def get_theo_status(date, off_i, off_p):
+    # Logique : Si c'est un férié, c'est FC. 
+    # Note : L'optimisateur ne placera pas de CX sur un FC, il le sautera.
     if is_holiday(date): return "FC"
+    
     week_num = date.isocalendar()[1]
     repos_prevus = off_p if week_num % 2 == 0 else off_i
-    # (date.weekday() + 1) % 7 pour adapter au format Dimanche=0
     return "ZZ" if jours_noms[ (date.weekday() + 1) % 7 ] in repos_prevus else "TRA"
 
 def calculate_cz(current_map, start_view, end_view, off_i, off_p):
     cz_days = set()
+    # On recule au dimanche précédent pour caler le cycle
     delta_dimanche = (start_view.weekday() + 1) % 7
     curr = start_view - timedelta(days=delta_dimanche)
     
@@ -56,26 +61,30 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
         for d in week_dates:
             week_num = d.isocalendar()[1]
             repos_cycle = off_p if week_num % 2 == 0 else off_i
+            # Le FC compte comme un ZZ s'il tombe sur un jour défini comme repos dans la config
+            # La condition ci-dessous vérifie le "Nom du jour" vs la "Config", donc ça marche même si c'est Férié
             if jours_noms[(d.weekday() + 1) % 7] in repos_cycle:
                 nb_repos_trigger += 1
         
         if nb_repos_trigger >= 3:
             actual_states = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week_dates]
+            # On vérifie qu'il y a bien un CX posé et pas de C4
             if "CX" in actual_states and "C4" not in actual_states:
                 for d in week_dates:
                     status_actuel = current_map.get(d, get_theo_status(d, off_i, off_p))
+                    # Le FC devient rouge (CZ) si conditions réunies, tout comme le ZZ
                     if status_actuel in ["ZZ", "FC"]:
                         cz_days.add(d)
                         break
         curr += timedelta(days=7)
     return cz_days
 
-# Fonction utilitaire pour savoir si un jour est "OFF" (Repos, Congé, Férié, etc.)
-def is_day_off(date, current_map, cz_set, off_i, off_p):
-    # Si c'est un CZ calculé, c'est OFF
+# Fonction utilitaire pour savoir si un jour est "OFF" (Repos, Congé, Férié, CZ, C4)
+# Sert à trouver les bornes DJT et RAT
+def is_day_off_strict(date, current_map, cz_set, off_i, off_p):
     if date in cz_set: return True
-    # Sinon on regarde le statut (manuel ou théorique)
     status = current_map.get(date, get_theo_status(date, off_i, off_p))
+    # Tout ce qui n'est pas TRA est considéré comme repos/absence
     return status != "TRA"
 
 # --- SIDEBAR ---
@@ -98,15 +107,26 @@ with st.sidebar:
         st.session_state.cal_map = {}
         curr_opt, c4_used = d_start, 0
         while curr_opt <= d_end:
+            # Recalcul dynamique des CZ pour vérifier le quota
             temp_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-            if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)) >= quota_limit: break
-            if get_theo_status(curr_opt, off_i, off_p) == "TRA":
+            current_total = sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)
+            
+            if current_total >= quota_limit: break
+            
+            stat_du_jour = get_theo_status(curr_opt, off_i, off_p)
+            
+            # OPTIMISATION : On ne pose QUE sur du TRA.
+            # Si c'est FC ou ZZ, on passe au jour suivant (donc on économise le CX et on le place plus loin)
+            if stat_du_jour == "TRA":
                 if c4_used < c4_limit:
                     st.session_state.cal_map[curr_opt] = "C4"; c4_used += 1
                 else:
                     st.session_state.cal_map[curr_opt] = "CX"
-                    if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))) > quota_limit:
+                    # Vérification post-pose : si on dépasse le quota à cause d'un nouveau CZ généré, on annule
+                    new_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
+                    if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(new_cz)) > quota_limit:
                         del st.session_state.cal_map[curr_opt]; break
+            
             curr_opt += timedelta(days=1)
         st.rerun()
 
@@ -117,36 +137,47 @@ with st.sidebar:
 # --- HEADER ---
 st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
 
-# --- CALCULS ---
-mois_affichage = sorted(list(set([(d_start.year, d_start.month), (d_end.year, d_end.month)])))
-if len(mois_affichage) < 2:
-    m, y = (d_start.month + 1, d_start.year) if d_start.month < 12 else (1, d_start.year + 1)
-    mois_affichage.append((y, m))
+# --- CALCULS BORNAGE (DJT / RAT) ---
+# On calcule large (-40 / +40 jours) pour être sûr de trouver les bornes
+search_start = d_start - timedelta(days=40)
+search_end = d_end + timedelta(days=40)
 
-v_start = datetime(mois_affichage[0][0], mois_affichage[0][1], 1).date()
-v_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=14) # Marge large pour le calcul
+# 1. Calcul global des CZ pour que les bornes ne tombent pas sur un CZ
+cz_global = calculate_cz(st.session_state.cal_map, search_start, search_end, off_i, off_p)
 
-# 1. Calcul des CZ
-cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
+# 2. Recherche DJT (Reculer tant que c'est OFF)
+djt_date = d_start - timedelta(days=1)
+while is_day_off_strict(djt_date, st.session_state.cal_map, cz_global, off_i, off_p):
+    djt_date -= timedelta(days=1)
 
-# 2. Calcul du Quota
+# 3. Recherche RAT (Avancer tant que c'est OFF)
+rat_date = d_end + timedelta(days=1)
+while is_day_off_strict(rat_date, st.session_state.cal_map, cz_global, off_i, off_p):
+    rat_date += timedelta(days=1)
+
+# 4. Calculs Compteurs
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-decompte = nb_cx + len(cz_totaux)
+# On filtre les CZ pour ne compter que ceux dans la période affichée (ou globale selon préférence, ici liée à l'absence)
+cz_utiles = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
+decompte = nb_cx + len(cz_utiles)
 
-# 3. Calcul du "Tunnel de Repos" (Repos Consécutifs)
-# On part de la date de début et on recule tant que c'est OFF
-streak_start = d_start
-while is_day_off(streak_start - timedelta(days=1), st.session_state.cal_map, cz_totaux, off_i, off_p):
-    streak_start -= timedelta(days=1)
+# TUNNEL : Nombre de jours OFF stricts entre DJT et RAT
+tunnel_count = (rat_date - djt_date).days - 1
 
-# On part de la date de fin et on avance tant que c'est OFF
-streak_end = d_end
-while is_day_off(streak_end + timedelta(days=1), st.session_state.cal_map, cz_totaux, off_i, off_p):
-    streak_end += timedelta(days=1)
+# --- DEFINITION MOIS AFFICHAGE ---
+# On veut afficher du mois du DJT jusqu'au mois du RAT
+mois_affichage = sorted(list(set([(djt_date.year, djt_date.month), (rat_date.year, rat_date.month)])))
+# Remplir les trous si l'absence chevauche plusieurs mois
+curr_m = datetime(mois_affichage[0][0], mois_affichage[0][1], 1)
+end_m_date = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 1)
+while curr_m < end_m_date:
+    curr_m += timedelta(days=32)
+    curr_m = datetime(curr_m.year, curr_m.month, 1)
+    if (curr_m.year, curr_m.month) not in mois_affichage:
+        mois_affichage.append((curr_m.year, curr_m.month))
+mois_affichage.sort()
 
-total_repos_consecutif = (streak_end - streak_start).days + 1
-
-# --- DASHBOARD (2 COLONNES) ---
+# --- DASHBOARD ---
 c1, c2 = st.columns(2)
 
 with c1: 
@@ -160,9 +191,9 @@ with c1:
 
 with c2: 
     st.markdown(f"""
-        <div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;">
-            <h1>{total_repos_consecutif}</h1>
-            <div class="metric-label">Tunnel de Repos (Jours Consécutifs)</div>
+        <div class="metric-box" style="border-color:#00FFFF; color:#00FFFF;">
+            <h1>{tunnel_count}</h1>
+            <div class="metric-label">Tunnel (DJT ➔ RAT)</div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -178,13 +209,22 @@ for yr, mo in mois_affichage:
             if d.month != mo: continue
             
             user_val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
-            is_cz = d in cz_totaux
+            is_cz = d in cz_global
             display = "CZ" if is_cz else user_val
             
             # Gestion de la couleur de fond
             bg_class = f"bg-{display.lower()}"
             
             with cols[i]:
+                # Affichage des bornes au dessus de la carte pour éviter les bugs HTML dans la carte
+                if d == djt_date:
+                    st.markdown('<span style="color:#FF6600; font-weight:bold;">🟠 DJT</span>', unsafe_allow_html=True)
+                elif d == rat_date:
+                    st.markdown('<span style="color:#00FFFF; font-weight:bold;">🔵 RAT</span>', unsafe_allow_html=True)
+                else:
+                    # Espace vide pour aligner verticalement si besoin, ou rien
+                    st.write("") 
+
                 st.markdown(f'<div class="day-card {bg_class}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
                 
                 opts = ["TRA", "ZZ", "CX", "C4", "FC"]
