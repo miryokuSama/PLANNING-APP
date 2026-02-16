@@ -3,7 +3,7 @@ import calendar
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39 - V45", layout="wide")
+st.set_page_config(page_title="OPTICX31/39 - V46", layout="wide")
 
 # --- STYLE VISUEL ---
 st.markdown("""
@@ -26,10 +26,10 @@ st.markdown("""
     .metric-box { background: #222; color: #00FF00; padding: 20px; border-radius: 15px; text-align: center; border: 3px solid #00FF00; margin-bottom: 10px; }
     .metric-box h1 { font-size: 3.5rem; margin: 0; }
     
-    .tag-borne { font-weight: 900; font-size: 1.1rem; display:block; margin-bottom:2px;}
-    .info-repos { font-size: 1.5rem; color: #0070FF; font-weight: bold; text-align: center; padding: 10px; background: #f0f2f6; border-radius: 10px; margin-bottom: 20px; }
+    .tag-borne { font-weight: 900; font-size: 1.1rem; display:block; margin-bottom:2px; text-transform: uppercase;}
+    .info-repos { font-size: 1.4rem; color: #0070FF; font-weight: bold; text-align: center; padding: 15px; background: #E8F0FF; border: 2px solid #0070FF; border-radius: 15px; margin-bottom: 20px; }
     
-    .main-title { font-size: 3rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
+    .main-title { font-size: 3.5rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -39,7 +39,7 @@ if 'cal_map' not in st.session_state:
 
 jours_noms = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
 
-# --- FONCTIONS ---
+# --- FONCTIONS COEUR ---
 def is_holiday(date):
     feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
     return (date.day, date.month) in feries
@@ -72,19 +72,19 @@ def calculate_cz(current_map, start_view, end_view, off_i, off_p):
         curr += timedelta(days=7)
     return cz_days
 
-def is_worked(date, current_map, cz_set, off_i, off_p):
-    if date in cz_set: return False
-    return current_map.get(date, get_theo_status(date, off_i, off_p)) == "TRA"
+def get_final_status(date, current_map, cz_set, off_i, off_p):
+    if date in cz_set: return "CZ"
+    return current_map.get(date, get_theo_status(date, off_i, off_p))
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ CONFIG")
+    st.header("⚙️ CONFIGURATION")
     off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Dimanche", "Lundi"])
     off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Dimanche", "Lundi", "Samedi"])
     d_start = st.date_input("Début absence", datetime(2026, 5, 10))
     d_end = st.date_input("Fin absence", value=d_start)
     quota_limit = st.number_input("Quota Max", value=17)
-    c4_limit = st.number_input("C4 dispos", value=2)
+    c4_limit = st.number_input("Nb C4", value=2)
 
     if st.button("🚀 OPTIMISER", use_container_width=True):
         st.session_state.cal_map = {}
@@ -101,28 +101,30 @@ with st.sidebar:
                     del st.session_state.cal_map[curr]; break
             curr += timedelta(days=1)
         st.rerun()
-    if st.button("🗑️ RESET"): st.session_state.cal_map = {}; st.rerun()
+    if st.button("🗑️ RESET", use_container_width=True): st.session_state.cal_map = {}; st.rerun()
 
-# --- CALCULS ---
+# --- CALCULS BORNES ET REPOS ---
+# Scan large pour trouver DJT et RAT
 scan_s, scan_e = d_start - timedelta(days=60), d_end + timedelta(days=60)
 cz_global = calculate_cz(st.session_state.cal_map, scan_s, scan_e, off_i, off_p)
 
-# Bornes DJT / RAT
+# DJT : On recule jusqu'au premier TRA
 ptr_djt = d_start - timedelta(days=1)
-while not is_worked(ptr_djt, st.session_state.cal_map, cz_global, off_i, off_p): ptr_djt -= timedelta(days=1)
+while get_final_status(ptr_djt, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
+    ptr_djt -= timedelta(days=1)
 djt_date = ptr_djt
 
+# RAT : On avance jusqu'au premier TRA
 ptr_rat = d_end + timedelta(days=1)
-while not is_worked(ptr_rat, st.session_state.cal_map, cz_global, off_i, off_p): ptr_rat += timedelta(days=1)
+while get_final_status(ptr_rat, st.session_state.cal_map, cz_global, off_i, off_p) != "TRA":
+    ptr_rat += timedelta(days=1)
 rat_date = ptr_rat
 
-# Cumul Repos entre DJT et RAT
-nb_jours_repos = (rat_date - djt_date).days - 1
-
-# Quota
+# Calcul cumul
+total_off = (rat_date - djt_date).days - 1
 nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-cz_active = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-decompte = nb_cx + len(cz_active)
+cz_actuels = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
+decompte = nb_cx + len(cz_actuels)
 
 # --- AFFICHAGE ---
 st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
@@ -132,37 +134,52 @@ with col_q:
     color = "#FF0000" if decompte > quota_limit else "#00FF00"
     st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1><div style="font-weight:bold;">QUOTA DÉCOMPTÉ</div></div>', unsafe_allow_html=True)
 
-st.markdown(f'<div class="info-repos">🏖️ Total : {nb_jours_repos} jours de repos consécutifs (entre le {djt_date.strftime("%d/%m")} et le {rat_date.strftime("%d/%m")})</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="info-repos">🏖️ Vous avez <b>{total_off} jours</b> de repos consécutifs entre votre DJT ({djt_date.strftime("%d/%m")}) et votre RAT ({rat_date.strftime("%d/%m")})</div>', unsafe_allow_html=True)
 
 # --- CALENDRIER ---
+# Définir la liste des mois à afficher
 mois_list = []
 curr_m = datetime(djt_date.year, djt_date.month, 1)
 while curr_m <= datetime(rat_date.year, rat_date.month, 1):
     mois_list.append((curr_m.year, curr_m.month))
-    curr_m = (curr_m + timedelta(days=32)).replace(day=1)
+    if curr_m.month == 12: curr_m = datetime(curr_m.year + 1, 1, 1)
+    else: curr_m = datetime(curr_m.year, curr_m.month + 1, 1)
 
 for yr, mo in mois_list:
     st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
     cols_h = st.columns(7)
     for i, n in enumerate(jours_noms): cols_h[i].caption(n)
     
-    for week in calendar.Calendar(firstweekday=calendar.SUNDAY).monthdatescalendar(yr, mo):
+    cal = calendar.Calendar(firstweekday=calendar.SUNDAY)
+    for week in cal.monthdatescalendar(yr, mo):
         cols = st.columns(7)
         for i, d in enumerate(week):
-            if d.month != mo: continue
+            if d.month != mo:
+                cols[i].write("") # Case vide pour les jours hors mois
+                continue
             
-            val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
-            disp = "CZ" if d in cz_global else val
+            # Valeurs
+            val_theo = get_theo_status(d, off_i, off_p)
+            val_actuelle = st.session_state.cal_map.get(d, val_theo)
+            is_cz = d in cz_global
+            display = "CZ" if is_cz else val_actuelle
             
             with cols[i]:
+                # Bornes
                 if d == djt_date: st.markdown('<span class="tag-borne" style="color:#FF6600;">🟠 DJT</span>', unsafe_allow_html=True)
-                if d == rat_date: st.markdown('<span class="tag-borne" style="color:#00FFFF;">🔵 RAT</span>', unsafe_allow_html=True)
+                elif d == rat_date: st.markdown('<span class="tag-borne" style="color:#00FFFF;">🔵 RAT</span>', unsafe_allow_html=True)
+                else: st.markdown('<span class="tag-borne">&nbsp;</span>', unsafe_allow_html=True)
                 
-                st.markdown(f'<div class="day-card bg-{disp.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{disp}</div></div>', unsafe_allow_html=True)
+                # Carte
+                st.markdown(f'<div class="day-card bg-{display.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
                 
+                # Menu (Clé complexe pour forcer l'unicité par mois)
                 opts = ["TRA", "ZZ", "CX", "C4", "FC"]
-                # Clé unique par date uniquement pour éviter les conflits entre mois
-                new_sel = st.selectbox("mod", opts, index=opts.index(val) if val in opts else 0, key=f"d_{d.isoformat()}", label_visibility="collapsed")
-                if new_sel != val:
-                    st.session_state.cal_map[d] = new_sel
+                idx = opts.index(val_actuelle) if val_actuelle in opts else 0
+                
+                # Utilisation d'une clé incluant le mois et l'année pour éviter les bugs de collision
+                choix = st.selectbox("m", opts, index=idx, key=f"sel_{d}_{yr}_{mo}", label_visibility="collapsed")
+                
+                if choix != val_actuelle:
+                    st.session_state.cal_map[d] = choix
                     st.rerun()
