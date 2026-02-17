@@ -5,8 +5,9 @@ import calendar
 import holidays
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Optimiseur de Congés")
+st.set_page_config(layout="wide", page_title="Gestionnaire de Congés Dynamique")
 
+# (Styles CSS identiques au précédent pour la clarté)
 st.markdown("""
 <style>
     .day-container { border: 1px solid #ddd; padding: 5px; border-radius: 5px; min-height: 80px; font-size: 0.8em; }
@@ -21,6 +22,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- INITIALISATION SESSION STATE ---
+if 'manual_overrides' not in st.session_state:
+    st.session_state.manual_overrides = {}  # Format: {datetime.date: "CODE"}
+
 # --- FONCTIONS LOGIQUES ---
 
 def is_week_3_zz(date, parity_choice):
@@ -32,135 +37,111 @@ def get_base_code(date, parity_choice, fr_holidays):
     weekday = date.weekday()
     has_3_zz = is_week_3_zz(date, parity_choice)
     is_zz_day = (weekday >= 4) if has_3_zz else (weekday >= 5)
-    
     if date in fr_holidays:
         return "FC", is_zz_day
     return ("ZZ" if is_zz_day else "TRA"), is_zz_day
 
-def compute_calendar(dates, overrides, parity_choice, fr_holidays):
-    # Étape 1 : Assigner les codes de base ou manuels
-    current_codes = {}
-    for d in dates:
-        base_code, _ = get_base_code(d, parity_choice, fr_holidays)
-        current_codes[d] = overrides.get(d, base_code)
-    
-    # Étape 2 : Appliquer la logique VACS / CZ
+def compute_full_logic(dates, overrides, parity_choice, fr_holidays):
+    """Calcule les codes finaux pour une liste de dates données"""
+    current_codes = {d: overrides.get(d, get_base_code(d, parity_choice, fr_holidays)[0]) for d in dates}
     final_codes = current_codes.copy()
     in_vacs = False
     
     for i, d in enumerate(dates):
         code = current_codes[d]
-        _, is_zz_logic = get_base_code(d, parity_choice, fr_holidays)
-        
-        # Logique d'état VACS
-        if code == "CX":
-            in_vacs = True
+        if code == "CX": in_vacs = True
         elif code == "C4":
-            in_vacs = False # Le C4 termine la séquence actuelle
-            if i + 1 < len(dates):
-                next_code = current_codes[dates[i+1]]
-                if next_code in ["CX", "C4"]:
-                    # La VACS ne reprendra qu'au tour suivant (in_vacs reste False pour l'instant)
-                    pass 
-        elif code == "TRA":
             in_vacs = False
+            if i + 1 < len(dates) and current_codes[dates[i+1]] in ["CX", "C4"]: pass 
+        elif code == "TRA": in_vacs = False
 
-        # Transformation CZ (Seulement si en VACS et sur une semaine à 3 ZZ)
         if in_vacs and is_week_3_zz(d, parity_choice) and (code == "ZZ" or code == "FC"):
-            if code != "FC": # On garde l'affichage FC mais logiquement c'est un CZ
-                final_codes[d] = "CZ"
+            if code != "FC": final_codes[d] = "CZ"
                 
     return final_codes
 
-# --- ALGORITHME D'OPTIMISATION ---
-def optimize_vacations(dates, parity_choice, fr_holidays, max_cx, max_c4):
-    best_overrides = {}
-    max_absence = 0
-    
-    # Stratégie : On cherche à poser les CX/C4 sur les jours TRA qui touchent des semaines à 3 ZZ
-    potential_days = [d for d in dates if get_base_code(d, parity_choice, fr_holidays)[0] == "TRA"]
-    
-    # Pour Streamlit, on va utiliser une approche glissante simple pour éviter de planter le navigateur
-    # On essaie de poser les CX pour créer la plus longue chaîne
-    for start_idx in range(len(potential_days)):
-        temp_overrides = {}
-        cx_left = max_cx
-        c4_left = max_c4
-        
-        for d in potential_days[start_idx:]:
-            if cx_left > 0:
-                temp_overrides[d] = "CX"
-                cx_left -= 1
-            elif c4_left > 0:
-                temp_overrides[d] = "C4"
-                c4_left -= 1
-        
-        test_calendar = compute_calendar(dates, temp_overrides, parity_choice, fr_holidays)
-        current_absence = sum(1 for c in test_calendar.values() if c != "TRA")
-        
-        if current_absence > max_absence:
-            max_absence = current_absence
-            best_overrides = temp_overrides
-            
-    return best_overrides
-
-# --- INTERFACE ---
-st.title("Calendrier de Congés Interactif & Optimisé")
-
+# --- BARRE LATÉRALE (SÉLECTEUR) ---
 with st.sidebar:
-    st.header("1. Paramètres")
-    year = st.number_input("Année", 2024, 2030, 2025)
-    month = st.selectbox("Mois", range(1, 13), index=datetime.datetime.now().month - 1)
-    parity = st.radio("Repos (3j) le Vendredi :", ["Semaines Paires", "Semaines Impaires"])
+    st.header("📅 Période & Paramètres")
     
-    st.header("2. Solde disponible")
-    solde_cx = st.slider("Nombre de CX", 0, 30, 5)
-    solde_c4 = st.slider("Nombre de C4", 0, 10, 2)
+    # Meilleur sélecteur : Date input configuré pour choisir un mois
+    today = datetime.date.today()
+    selected_date = st.date_input("Choisir un mois à afficher", value=today)
+    view_year = selected_date.year
+    view_month = selected_date.month
+
+    parity = st.radio("Repos (3j) le Vendredi :", ["Semaines Paires", "Semaines Impaires"], index=1)
     
-    if st.button("🚀 OPTIMISER MON MOIS"):
-        dates = [datetime.date(year, month, d) for d in range(1, calendar.monthrange(year, month)[1] + 1)]
-        fr_hols = holidays.France(years=year)
-        best_plan = optimize_vacations(dates, parity, fr_hols, solde_cx, solde_c4)
-        st.session_state.manual_overrides = best_plan
-        st.success("Calendrier optimisé !")
+    st.divider()
+    st.header("💰 Solde pour Optimisation")
+    solde_cx = st.number_input("Nombre de CX", 0, 100, 5)
+    solde_c4 = st.number_input("Nombre de C4", 0, 100, 2)
 
-# Données de base
-dates = [datetime.date(year, month, d) for d in range(1, calendar.monthrange(year, month)[1] + 1)]
-fr_hols = holidays.France(years=year)
+    if st.button("🚀 Optimiser ce mois"):
+        # Logique d'optimisation (limitée au mois en cours pour la performance)
+        all_month_days = [datetime.date(view_year, view_month, d) for d in range(1, calendar.monthrange(view_year, view_month)[1] + 1)]
+        fr_hols = holidays.France(years=view_year)
+        
+        # Algorithme simplifié (glissant)
+        best_o = {}
+        max_a = 0
+        potential_days = [d for d in all_month_days if get_base_code(d, parity, fr_hols)[0] == "TRA"]
+        
+        for start in range(len(potential_days)):
+            temp = {}
+            c_left, c4_left = solde_cx, solde_c4
+            for d in potential_days[start:]:
+                if c_left > 0: temp[d] = "CX"; c_left -= 1
+                elif c4_left > 0: temp[d] = "C4"; c4_left -= 1
+            
+            res = compute_full_logic(all_month_days, {**st.session_state.manual_overrides, **temp}, parity, fr_hols)
+            score = sum(1 for c in res.values() if c != "TRA")
+            if score > max_a:
+                max_a = score
+                best_o = temp
+        
+        st.session_state.manual_overrides.update(best_o)
+        st.rerun()
 
-if 'manual_overrides' not in st.session_state:
-    st.session_state.manual_overrides = {}
+    if st.button("🗑️ Effacer tout le calendrier"):
+        st.session_state.manual_overrides = {}
+        st.rerun()
 
-# Calcul final
-final_calendar = compute_calendar(dates, st.session_state.manual_overrides, parity, fr_hols)
+# --- CALCULS ---
+days_in_month = [datetime.date(view_year, view_month, d) for d in range(1, calendar.monthrange(view_year, view_month)[1] + 1)]
+fr_hols = holidays.France(years=view_year)
+final_calendar = compute_full_logic(days_in_month, st.session_state.manual_overrides, parity, fr_hols)
 
-# Métriques
-abs_total = sum(1 for c in final_calendar.values() if c != "TRA")
-st.metric("Total jours d'absence (Entreprise)", f"{abs_total} jours")
+# --- AFFICHAGE ---
+st.title(f"Planification : {calendar.month_name[view_month]} {view_year}")
 
-# Affichage Grille
+# Métriques globales (sur ce qui est en mémoire)
+total_abs = sum(1 for d, c in final_calendar.items() if c != "TRA")
+st.metric("Total jours d'absence (Ce mois)", f"{total_abs} jours")
+
+# Grille de calendrier
 cols = st.columns(7)
 for i, name in enumerate(["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]):
-    cols[i].write(f"**{name}**")
+    cols[i].markdown(f"**{name}**")
 
 grid = st.columns(7)
-for i in range(dates[0].weekday()):
-    grid[i].write("")
+first_day_weekday = days_in_month[0].weekday()
+for i in range(first_day_weekday):
+    grid[i].empty()
 
-for d in dates:
+for d in days_in_month:
     code = final_calendar[d]
     with grid[d.weekday()]:
         st.markdown(f"""<div class="day-container code-{code}"><div class="day-number">{d.day}</div><div class="code-label">{code}</div></div>""", unsafe_allow_html=True)
         
-        # Modification manuelle
-        options = ["TRA", "CX", "C4", "ZZ", "FC"] if d in fr_hols else ["TRA", "CX", "C4", "ZZ"]
-        current_idx = options.index(code) if code in options else options.index("ZZ")
+        # Sélecteur compact
+        opts = ["TRA", "CX", "C4", "ZZ", "FC"] if d in fr_hols else ["TRA", "CX", "C4", "ZZ"]
+        # On s'assure que la valeur actuelle est dans les options pour éviter l'erreur
+        current_val = code if code in opts else "ZZ" 
         
-        new_code = st.selectbox("", options, index=current_idx, key=f"s_{d}", label_visibility="collapsed")
-        if new_code != (st.session_state.manual_overrides.get(d, get_base_code(d, parity, fr_hols)[0])):
-            st.session_state.manual_overrides[d] = new_code
+        new_c = st.selectbox("", opts, index=opts.index(current_val), key=f"d_{d}", label_visibility="collapsed")
+        
+        # Si l'utilisateur change manuellement
+        if new_c != (st.session_state.manual_overrides.get(d, get_base_code(d, parity, fr_hols)[0])):
+            st.session_state.manual_overrides[d] = new_c
             st.rerun()
-
-if st.button("Réinitialiser"):
-    st.session_state.manual_overrides = {}
-    st.rerun()
