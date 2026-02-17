@@ -1,156 +1,166 @@
 import streamlit as st
+from datetime import date, timedelta
 import calendar
-from datetime import datetime, timedelta
 
-# --- CONFIGURATION PAGE ---
-st.set_page_config(page_title="OPTICX31/39", layout="wide")
+st.set_page_config(layout="wide")
+st.title("📅 Calendrier interactif de congés")
 
-# --- STYLE VISUEL ---
-st.markdown("""
-    <style>
-    .bg-zz { background-color: #00FF00 !important; color: black !important; border: 2px solid #000; } 
-    .bg-fc { background-color: #FFFF00 !important; color: black !important; border: 2px solid #000; } 
-    .bg-cx { background-color: #0070FF !important; color: white !important; border: 2px solid #000; } 
-    .bg-c4 { background-color: #A000FF !important; color: white !important; border: 2px solid #000; } 
-    .bg-cz { background-color: #FF0000 !important; color: white !important; border: 2px solid #000; }
-    .bg-tra { background-color: #FFFFFF !important; color: #333 !important; border: 1px solid #ddd; }
-    .day-card { border-radius: 10px; padding: 10px; min-height: 140px; text-align: center; box-shadow: 4px 4px 0px #222; margin-bottom: 5px; display: flex; flex-direction: column; justify-content: center; }
-    .date-num { font-size: 2.5rem; font-weight: 900; line-height: 1; }
-    .status-code { font-size: 1.4rem; font-weight: 900; margin-top: 5px; }
-    .metric-box { background: #222; color: #00FF00; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #00FF00; }
-    .metric-box h1 { font-size: 3rem; margin: 0; }
-    .main-title { font-size: 4rem; font-weight: 900; color: #0070FF; text-align: center; margin-bottom: 20px; border-bottom: 5px solid #0070FF; }
-    </style>
-""", unsafe_allow_html=True)
+CODES = ["TRA", "CX", "ZZ", "C4", "FC"]
 
-# --- INITIALISATION ---
-if 'cal_map' not in st.session_state:
-    st.session_state.cal_map = {}
+# =========================
+# PARAMÈTRES
+# =========================
 
-# On définit le dimanche en premier (Index 0 pour le calendrier Dimanche-Samedi)
-jours_noms = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
+st.sidebar.header("Paramètres")
 
-# --- FONCTIONS LOGIQUES ---
-def is_holiday(date):
-    feries = {(1,1),(1,5),(8,5),(14,5),(25,5),(14,7),(15,8),(1,11),(11,11),(25,12)}
-    return (date.day, date.month) in feries
+mode_semaine = st.sidebar.radio(
+    "Semaines avec 3 ZZ",
+    ["Semaines impaires", "Semaines paires"]
+)
 
-def get_theo_status(date, off_i, off_p):
-    if is_holiday(date): return "FC"
-    week_num = date.isocalendar()[1]
-    repos_prevus = off_p if week_num % 2 == 0 else off_i
-    return "ZZ" if jours_noms[ (date.weekday() + 1) % 7 ] in repos_prevus else "TRA"
+year = st.sidebar.selectbox("Année", [2026, 2027, 2028])
 
-def calculate_cz(current_map, start_view, end_view, off_i, off_p):
-    cz_days = set()
-    # Début au dimanche précédent
-    delta_dimanche = (start_view.weekday() + 1) % 7
-    curr = start_view - timedelta(days=delta_dimanche)
-    
-    while curr <= end_view:
-        week_dates = [curr + timedelta(days=i) for i in range(7)]
-        nb_repos_trigger = 0
-        for d in week_dates:
-            week_num = d.isocalendar()[1]
-            repos_cycle = off_p if week_num % 2 == 0 else off_i
-            # Index ajusté pour faire correspondre le nom du jour avec jours_noms
-            if jours_noms[(d.weekday() + 1) % 7] in repos_cycle:
-                nb_repos_trigger += 1
-        
-        if nb_repos_trigger >= 3:
-            actual_states = [current_map.get(d, get_theo_status(d, off_i, off_p)) for d in week_dates]
-            if "CX" in actual_states and "C4" not in actual_states:
-                for d in week_dates:
-                    status_actuel = current_map.get(d, get_theo_status(d, off_i, off_p))
-                    if status_actuel in ["ZZ", "FC"]:
-                        cz_days.add(d)
-                        break
-        curr += timedelta(days=7)
-    return cz_days
+month1 = st.sidebar.selectbox("Mois 1", list(range(1, 13)))
+month2 = st.sidebar.selectbox("Mois 2", list(range(1, 13)))
 
-# --- SIDEBAR & SYNCHRO DATES ---
-with st.sidebar:
-    st.header("⚙️ CONFIGURATION")
-    off_i = st.multiselect("Repos IMPAIRS", jours_noms, default=["Dimanche", "Lundi"])
-    off_p = st.multiselect("Repos PAIRS", jours_noms, default=["Dimanche", "Lundi", "Samedi"])
-    
-    st.divider()
-    # Logique de synchro auto : d_start influence la valeur par défaut de d_end
-    d_start = st.date_input("Début absence", datetime(2026, 5, 10))
-    d_end = st.date_input("Fin absence", value=d_start) # J+0 automatique
-    
-    if d_end < d_start:
-        st.error("La fin ne peut pas être avant le début.")
+quota_CX = st.sidebar.number_input("Quota CX disponible", 0, 60, 25)
+quota_C4 = st.sidebar.number_input("Quota C4 disponible", 0, 30, 5)
 
-    st.divider()
-    quota_limit = st.number_input("Quota Max (CX+CZ)", value=17)
-    c4_limit = st.number_input("Nb C4 dispos", value=2)
+# =========================
+# FÉRIÉS (exemple fixe)
+# =========================
 
-    if st.button("🚀 OPTIMISER", use_container_width=True):
-        st.session_state.cal_map = {}
-        curr_opt, c4_used = d_start, 0
-        while curr_opt <= d_end:
-            temp_cz = calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p)
-            if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(temp_cz)) >= quota_limit: break
-            if get_theo_status(curr_opt, off_i, off_p) == "TRA":
-                if c4_used < c4_limit:
-                    st.session_state.cal_map[curr_opt] = "C4"; c4_used += 1
+FERIES = [
+    date(2026, 1, 1),
+    date(2026, 5, 1),
+    date(2026, 5, 8),
+    date(2026, 7, 14),
+    date(2026, 8, 15),
+    date(2026, 11, 1),
+    date(2026, 11, 11),
+    date(2026, 12, 25)
+]
+
+# =========================
+# GÉNÉRATION JOURS 2 MOIS
+# =========================
+
+def generate_month(y, m):
+    days = []
+    cal = calendar.monthcalendar(y, m)
+    for week in cal:
+        for d in week:
+            if d != 0:
+                current_date = date(y, m, d)
+                week_number = current_date.isocalendar().week
+                is_pair = week_number % 2 == 0
+
+                if mode_semaine == "Semaines impaires":
+                    semaine_3ZZ = not is_pair
                 else:
-                    st.session_state.cal_map[curr_opt] = "CX"
-                    if (sum(1 for v in st.session_state.cal_map.values() if v == "CX") + len(calculate_cz(st.session_state.cal_map, d_start, d_end, off_i, off_p))) > quota_limit:
-                        del st.session_state.cal_map[curr_opt]; break
-            curr_opt += timedelta(days=1)
-        st.rerun()
+                    semaine_3ZZ = is_pair
 
-    if st.button("🗑️ RESET", use_container_width=True):
-        st.session_state.cal_map = {}
-        st.rerun()
+                default_code = "TRA"
+                if current_date in FERIES:
+                    default_code = "FC"
 
-# --- HEADER ---
-st.markdown('<div class="main-title">OPTICX31/39</div>', unsafe_allow_html=True)
+                days.append({
+                    "date": current_date,
+                    "code": default_code,
+                    "semaine_3ZZ": semaine_3ZZ
+                })
+    return days
 
-# --- CALCULS ---
-mois_affichage = sorted(list(set([(d_start.year, d_start.month), (d_end.year, d_end.month)])))
-if len(mois_affichage) < 2:
-    m, y = (d_start.month + 1, d_start.year) if d_start.month < 12 else (1, d_start.year + 1)
-    mois_affichage.append((y, m))
+days_list = generate_month(year, month1) + generate_month(year, month2)
 
-v_start = datetime(mois_affichage[0][0], mois_affichage[0][1], 1).date()
-v_end = datetime(mois_affichage[-1][0], mois_affichage[-1][1], 28).date() + timedelta(days=10)
+days_list = sorted(days_list, key=lambda x: x["date"])
 
-cz_totaux = calculate_cz(st.session_state.cal_map, v_start, v_end, off_i, off_p)
-nb_cx = sum(1 for v in st.session_state.cal_map.values() if v == "CX")
-decompte = nb_cx + len(cz_totaux)
+# =========================
+# SÉLECTION UTILISATEUR
+# =========================
 
-# --- DASHBOARD ---
-c1, c2, c3 = st.columns(3)
-with c1: 
-    color = "#FF0000" if decompte > quota_limit else "#00FF00"
-    st.markdown(f'<div class="metric-box" style="border-color:{color}; color:{color};"><h1>{decompte}/{quota_limit}</h1>QUOTA</div>', unsafe_allow_html=True)
-with c2: st.markdown(f'<div class="metric-box" style="border-color:#0070FF; color:#0070FF;"><h1>{(d_end-d_start).days+1}</h1>JOURS</div>', unsafe_allow_html=True)
-with c3: st.markdown(f'<div class="metric-box" style="border-color:#FFFF00; color:#FFFF00;"><h1>{((d_end-d_start).days+1)-decompte}</h1>GAIN</div>', unsafe_allow_html=True)
+st.markdown("### Sélection des jours")
 
-# --- CALENDRIER (START SUNDAY) ---
-for yr, mo in mois_affichage:
-    st.markdown(f"### 🗓️ {calendar.month_name[mo].upper()} {yr}")
-    cols_h = st.columns(7)
-    for idx, n in enumerate(jours_noms): cols_h[idx].caption(n)
-    
-    # calendar.SUNDAY définit le début de semaine dans l'itérateur
-    for week in calendar.Calendar(firstweekday=calendar.SUNDAY).monthdatescalendar(yr, mo):
-        cols = st.columns(7)
-        for i, d in enumerate(week):
-            if d.month != mo: continue
-            
-            user_val = st.session_state.cal_map.get(d, get_theo_status(d, off_i, off_p))
-            is_cz = d in cz_totaux
-            display = "CZ" if is_cz else user_val
-            
-            with cols[i]:
-                st.markdown(f'<div class="day-card bg-{display.lower()}"><div class="date-num">{d.day}</div><div class="status-code">{display}</div></div>', unsafe_allow_html=True)
-                opts = ["TRA", "ZZ", "CX", "C4", "FC"]
-                if user_val not in opts: user_val = "TRA"
-                selection = st.selectbox("Action", opts, index=opts.index(user_val), key=f"s_{d.isoformat()}", label_visibility="collapsed")
-                if selection != user_val:
-                    st.session_state.cal_map[d] = selection
-                    st.rerun()
+for day in days_list:
+    d = day["date"]
+    selected = st.selectbox(
+        f"{d.strftime('%a')} {d.day}/{d.month}",
+        CODES,
+        index=CODES.index(day["code"]),
+        key=str(d)
+    )
+    day["code"] = selected
+
+# =========================
+# LOGIQUE VACS + CZ
+# =========================
+
+vacation_active = False
+
+for i in range(len(days_list)):
+
+    code = days_list[i]["code"]
+
+    if code == "CX":
+        vacation_active = True
+
+    if vacation_active:
+
+        if code == "ZZ" and days_list[i]["semaine_3ZZ"]:
+
+            # Vérifie CX futur avant fin VACS
+            for j in range(i+1, len(days_list)):
+                if days_list[j]["code"] == "TRA":
+                    break
+                if days_list[j]["code"] == "CX":
+                    days_list[i]["code"] = "CZ"
+                    break
+
+        if code == "TRA":
+            vacation_active = False
+
+        if code == "C4":
+            vacation_active = False
+
+# =========================
+# COMPTEURS
+# =========================
+
+absence_total = 0
+used_CX = 0
+used_C4 = 0
+
+for day in days_list:
+
+    if day["code"] != "TRA":
+        absence_total += 1
+
+    if day["code"] == "CX":
+        used_CX += 1
+
+    if day["code"] == "CZ":
+        used_CX += 1
+
+    if day["code"] == "C4":
+        used_C4 += 1
+
+remaining_CX = quota_CX - used_CX
+remaining_C4 = quota_C4 - used_C4
+
+st.markdown("---")
+st.metric("Absence totale entreprise", absence_total)
+
+col1, col2 = st.columns(2)
+
+col1.metric("CX utilisés (CX + CZ)", used_CX)
+col1.metric("CX restants", remaining_CX)
+
+col2.metric("C4 utilisés", used_C4)
+col2.metric("C4 restants", remaining_C4)
+
+# =========================
+# BOUTON OPTIMISATION
+# =========================
+
+if st.button("Optimiser les jours d'absence"):
+    st.info("Moteur d'optimisation avancé à implémenter (maximisation stratégique des ponts).")
