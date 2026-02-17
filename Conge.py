@@ -3,12 +3,21 @@ from datetime import date
 import calendar
 
 st.set_page_config(layout="wide")
-st.title("📅 Calendrier interactif de congés")
+st.title("📅 Planning congés interactif")
 
 CODES = ["TRA", "CX", "ZZ", "C4", "FC"]
 
+COLOR_MAP = {
+    "TRA": "#E0E0E0",
+    "CX": "#FF4B4B",
+    "CZ": "#9C27B0",
+    "ZZ": "#2196F3",
+    "C4": "#FF9800",
+    "FC": "#4CAF50"
+}
+
 # =====================================================
-# SIDEBAR PARAMÈTRES
+# SIDEBAR
 # =====================================================
 
 st.sidebar.header("Paramètres")
@@ -19,7 +28,6 @@ mode_semaine = st.sidebar.radio(
 )
 
 year = st.sidebar.selectbox("Année", [2026, 2027, 2028])
-
 month1 = st.sidebar.selectbox("Mois 1", list(range(1, 13)))
 month2 = st.sidebar.selectbox("Mois 2", list(range(1, 13)))
 
@@ -27,7 +35,7 @@ quota_CX = st.sidebar.number_input("Quota CX disponible", 0, 60, 25)
 quota_C4 = st.sidebar.number_input("Quota C4 disponible", 0, 30, 5)
 
 # =====================================================
-# FÉRIÉS (exemple fixe 2026)
+# FÉRIÉS FIXES (exemple)
 # =====================================================
 
 FERIES = [
@@ -42,7 +50,7 @@ FERIES = [
 ]
 
 # =====================================================
-# GÉNÉRATION DES JOURS
+# GÉNÉRATION MOIS
 # =====================================================
 
 def generate_month(y, m):
@@ -73,104 +81,119 @@ def generate_month(y, m):
 
     return days
 
-
-days_list = generate_month(year, month1) + generate_month(year, month2)
-days_list = sorted(days_list, key=lambda x: x["date"])
-
 # =====================================================
-# AFFICHAGE SÉLECTION UTILISATEUR
+# LOGIQUE VACS + CZ
 # =====================================================
 
-st.markdown("### Sélection des jours")
+def apply_vacs_logic(days_list):
+    vacation_active = False
 
-for idx, day in enumerate(days_list):
+    for i in range(len(days_list)):
 
-    d = day["date"]
+        code = days_list[i]["code"]
 
-    selected = st.selectbox(
-        f"{d.strftime('%a')} {d.day}/{d.month}",
-        CODES,
-        index=CODES.index(day["code"]),
-        key=f"select_{idx}_{d.isoformat()}"
-    )
+        if code == "CX":
+            vacation_active = True
 
-    day["code"] = selected
+        if vacation_active:
 
-# =====================================================
-# LOGIQUE VACS + TRANSFORMATION CZ
-# =====================================================
+            if code == "ZZ" and days_list[i]["semaine_3ZZ"]:
+                for j in range(i + 1, len(days_list)):
+                    if days_list[j]["code"] == "TRA":
+                        break
+                    if days_list[j]["code"] == "CX":
+                        days_list[i]["code"] = "CZ"
+                        break
 
-vacation_active = False
+            if code in ["TRA", "C4"]:
+                vacation_active = False
 
-for i in range(len(days_list)):
-
-    code = days_list[i]["code"]
-
-    # Début VACS
-    if code == "CX":
-        vacation_active = True
-
-    if vacation_active:
-
-        # Transformation ZZ -> CZ
-        if code == "ZZ" and days_list[i]["semaine_3ZZ"]:
-
-            # Cherche CX futur avant fin VACS
-            for j in range(i + 1, len(days_list)):
-                if days_list[j]["code"] == "TRA":
-                    break
-                if days_list[j]["code"] == "CX":
-                    days_list[i]["code"] = "CZ"
-                    break
-
-        # Fin VACS
-        if code == "TRA":
-            vacation_active = False
-
-        if code == "C4":
-            vacation_active = False
+    return days_list
 
 # =====================================================
-# COMPTEURS
+# AFFICHAGE CALENDRIER GRILLE
 # =====================================================
 
-absence_total = 0
-used_CX = 0
-used_C4 = 0
+def render_calendar(y, m):
 
-for day in days_list:
+    st.markdown(f"## {calendar.month_name[m]} {y}")
 
-    if day["code"] != "TRA":
-        absence_total += 1
+    cal = calendar.monthcalendar(y, m)
+    days_data = generate_month(y, m)
+    days_data = apply_vacs_logic(days_data)
 
-    if day["code"] == "CX":
-        used_CX += 1
+    absence_total = 0
+    used_CX = 0
+    used_C4 = 0
 
-    if day["code"] == "CZ":
-        used_CX += 1
+    headers = st.columns(7)
+    for i, day_name in enumerate(["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]):
+        headers[i].markdown(f"**{day_name}**")
 
-    if day["code"] == "C4":
-        used_C4 += 1
+    day_index = 0
 
-remaining_CX = quota_CX - used_CX
-remaining_C4 = quota_C4 - used_C4
+    for week in cal:
+        cols = st.columns(7)
 
-st.markdown("---")
-st.metric("Absence totale entreprise", absence_total)
+        for i, day_num in enumerate(week):
 
-col1, col2 = st.columns(2)
+            if day_num == 0:
+                cols[i].write("")
+            else:
+                day_data = days_data[day_index]
+                d = day_data["date"]
+                code = day_data["code"]
 
-with col1:
-    st.metric("CX utilisés (CX + CZ)", used_CX)
-    st.metric("CX restants", remaining_CX)
+                selected = cols[i].selectbox(
+                    "",
+                    CODES,
+                    index=CODES.index(code),
+                    key=f"{m}_{d.isoformat()}"
+                )
 
-with col2:
-    st.metric("C4 utilisés", used_C4)
-    st.metric("C4 restants", remaining_C4)
+                day_data["code"] = selected
+                code = selected
+
+                color = COLOR_MAP[code]
+
+                cols[i].markdown(
+                    f"""
+                    <div style="
+                        background-color:{color};
+                        padding:10px;
+                        border-radius:8px;
+                        text-align:center;
+                        color:white;
+                        font-weight:bold;
+                    ">
+                        {d.day}<br>{code}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                if code != "TRA":
+                    absence_total += 1
+
+                if code in ["CX", "CZ"]:
+                    used_CX += 1
+
+                if code == "C4":
+                    used_C4 += 1
+
+                day_index += 1
+
+    return absence_total, used_CX, used_C4
+
 
 # =====================================================
-# BOUTON OPTIMISATION (structure prête)
+# AFFICHAGE 2 MOIS CÔTE À CÔTE
 # =====================================================
 
-if st.button("Optimiser les jours d'absence"):
-    st.info("Moteur d'optimisation stratégique à implémenter.")
+colA, colB = st.columns(2)
+
+with colA:
+    abs1, cx1, c41 = render_calendar(year, month1)
+
+with colB:
+    abs2, cx2, c42 = render_cale_
