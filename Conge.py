@@ -251,4 +251,18 @@ absence_total = abs1 + abs2
 used_CX = cx1 + cx2
 used_C4 = c41 + c42
 
-remaining_CX = quota_CX -
+remaining_CX = quota_CX - used_CX
+remaining_C4 = quota_C4 - used_C4
+
+st.markdown("---")
+st.metric("Absence totale entreprise", absence_total)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.metric("CX utilisés (CX + CZ)", used_CX)
+    st.metric("CX restants", remaining_CX)
+
+with col2:
+    st.metric("C4 utilisés", used_C4)
+    st.metric("C4 restants", remaining_C4)
