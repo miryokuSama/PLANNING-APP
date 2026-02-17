@@ -2,119 +2,165 @@ import streamlit as st
 import pandas as pd
 import datetime
 import calendar
+import holidays
 
-# --- CONFIGURATION ET STYLE ---
-st.set_page_config(layout="wide", page_title="Calendrier Interactif Congés")
+# --- CONFIGURATION ---
+st.set_page_config(layout="wide", page_title="Optimiseur de Congés")
 
 st.markdown("""
 <style>
-    .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
-    .day-box { border: 1px solid #ccc; padding: 10px; border-radius: 5px; min-height: 100px; }
-    .code-TRA { background-color: #f0f2f6; }
-    .code-CX { background-color: #ff4b4b; color: white; }
-    .code-C4 { background-color: #ffa500; color: white; }
-    .code-ZZ { background-color: #90ee90; }
-    .code-CZ { background-color: #00ced1; color: white; }
-    .code-FC { background-color: #ffff00; font-weight: bold; }
+    .day-container { border: 1px solid #ddd; padding: 5px; border-radius: 5px; min-height: 80px; font-size: 0.8em; }
+    .code-TRA { background-color: #f0f2f6; color: #31333F; } 
+    .code-CX { background-color: #ff4b4b; color: white; } 
+    .code-C4 { background-color: #ffa500; color: white; } 
+    .code-ZZ { background-color: #90ee90; color: #004d00; } 
+    .code-CZ { background-color: #00ced1; color: white; } 
+    .code-FC { background-color: #ffff00; color: black; font-weight: bold; border: 2px solid #e6e600; } 
+    .day-number { font-weight: bold; }
+    .code-label { display: block; text-align: center; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- FONCTIONS LOGIQUES ---
-def get_french_holidays(year):
-    # Liste simplifiée des jours fériés français
-    return [
-        datetime.date(year, 1, 1), datetime.date(year, 5, 1), datetime.date(year, 5, 8),
-        datetime.date(year, 7, 14), datetime.date(year, 8, 15), datetime.date(year, 11, 1),
-        datetime.date(year, 11, 11), datetime.date(year, 12, 25)
-    ]
 
-def determine_base_code(date, holidays):
-    if date in holidays:
-        return "FC"
+def is_week_3_zz(date, parity_choice):
+    week_num = date.isocalendar()[1]
+    is_even = (week_num % 2 == 0)
+    return is_even if parity_choice == "Semaines Paires" else not is_even
+
+def get_base_code(date, parity_choice, fr_holidays):
+    weekday = date.weekday()
+    has_3_zz = is_week_3_zz(date, parity_choice)
+    is_zz_day = (weekday >= 4) if has_3_zz else (weekday >= 5)
     
-    is_even = date.isocalendar()[1] % 2 == 0
-    weekday = date.weekday() # 0=Lundi, 6=Dimanche
+    if date in fr_holidays:
+        return "FC", is_zz_day
+    return ("ZZ" if is_zz_day else "TRA"), is_zz_day
+
+def compute_calendar(dates, overrides, parity_choice, fr_holidays):
+    # Étape 1 : Assigner les codes de base ou manuels
+    current_codes = {}
+    for d in dates:
+        base_code, _ = get_base_code(d, parity_choice, fr_holidays)
+        current_codes[d] = overrides.get(d, base_code)
     
-    # Logique Semaines Pairs/Impairs (Exemple: Impair = 3 jours ZZ, Pair = 2 jours ZZ)
-    if is_even:
-        return "ZZ" if weekday >= 5 else "TRA" # Samedi, Dimanche
-    else:
-        return "ZZ" if weekday >= 4 else "TRA" # Vendredi, Samedi, Dimanche
-
-# --- INTERFACE UTILISATEUR ---
-st.title("📅 Planificateur de Congés Interactif")
-
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    year = st.selectbox("Année", [2025, 2026], index=1)
-    month = st.selectbox("Mois", range(1, 13), index=datetime.datetime.now().month - 1)
+    # Étape 2 : Appliquer la logique VACS / CZ
+    final_codes = current_codes.copy()
+    in_vacs = False
     
-    st.info("""
-    **Légende :**
-    - **CX** : Congé | **CZ** : Congé Généré
-    - **ZZ** : Repos | **TRA** : Travail
-    - **C4** : Supplément | **FC** : Férié
-    """)
-    
-    optimiser = st.button("🚀 Optimiser les jours d'absence")
-
-# --- CALCUL DU CALENDRIER ---
-num_days = calendar.monthrange(year, month)[1]
-days = [datetime.date(year, month, d) for d in range(1, num_days + 1)]
-holidays = get_french_holidays(year)
-
-# Initialisation de l'état
-if 'codes' not in st.session_state:
-    st.session_state.codes = {d: determine_base_code(d, holidays) for d in days}
-
-# --- LOGIQUE DE TRANSFORMATION (CZ & VACS) ---
-# (Ici on applique les règles sur les ZZ entourés de CX)
-current_codes = list(st.session_state.codes.values())
-for i in range(1, len(current_codes) - 1):
-    if current_codes[i] == "ZZ" or (current_codes[i] == "FC"):
-        # Règle CZ : si entouré par des CX sur la période de vacances
-        if "CX" in current_codes[:i] and "CX" in current_codes[i+1:]:
-             # Simplification de la logique "étau"
-             st.session_state.codes[days[i]] = "CZ"
-
-# --- CALCUL DU COMPTEUR ---
-# On compte tout ce qui n'est pas TRA
-absence_count = sum(1 for c in st.session_state.codes.values() if c != "TRA")
-
-with col1:
-    st.metric("Total Jours Absence", absence_count)
-
-# --- AFFICHAGE GRID TYPE OUTLOOK ---
-st.write(f"### {calendar.month_name[month]} {year}")
-cols = st.columns(7)
-days_of_week = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-
-for i, dow in enumerate(days_of_week):
-    cols[i].centered_text = f"**{dow}**"
-    cols[i].write(dow)
-
-grid_cols = st.columns(7)
-# Ajustement pour le premier jour du mois
-first_dow = days[0].weekday()
-
-for i in range(first_dow):
-    grid_cols[i].write("")
-
-for date in days:
-    idx = (date.day + first_dow - 1) % 7
-    with grid_cols[idx]:
-        current_code = st.session_state.codes[date]
-        st.markdown(f"""
-        <div class="day-box code-{current_code}">
-            {date.day}<br><strong>{current_code}</strong>
-        </div>
-        """, unsafe_allow_html=True)
+    for i, d in enumerate(dates):
+        code = current_codes[d]
+        _, is_zz_logic = get_base_code(d, parity_choice, fr_holidays)
         
-        # Menu pour changer manuellement
-        new_code = st.selectbox("", ["TRA", "CX", "C4", "ZZ", "FC"], 
-                                index=["TRA", "CX", "C4", "ZZ", "FC"].index(current_code),
-                                key=f"sel_{date}", label_visibility="collapsed")
-        if new_code != current_code:
-            st.session_state.codes[date] = new_code
+        # Logique d'état VACS
+        if code == "CX":
+            in_vacs = True
+        elif code == "C4":
+            in_vacs = False # Le C4 termine la séquence actuelle
+            if i + 1 < len(dates):
+                next_code = current_codes[dates[i+1]]
+                if next_code in ["CX", "C4"]:
+                    # La VACS ne reprendra qu'au tour suivant (in_vacs reste False pour l'instant)
+                    pass 
+        elif code == "TRA":
+            in_vacs = False
+
+        # Transformation CZ (Seulement si en VACS et sur une semaine à 3 ZZ)
+        if in_vacs and is_week_3_zz(d, parity_choice) and (code == "ZZ" or code == "FC"):
+            if code != "FC": # On garde l'affichage FC mais logiquement c'est un CZ
+                final_codes[d] = "CZ"
+                
+    return final_codes
+
+# --- ALGORITHME D'OPTIMISATION ---
+def optimize_vacations(dates, parity_choice, fr_holidays, max_cx, max_c4):
+    best_overrides = {}
+    max_absence = 0
+    
+    # Stratégie : On cherche à poser les CX/C4 sur les jours TRA qui touchent des semaines à 3 ZZ
+    potential_days = [d for d in dates if get_base_code(d, parity_choice, fr_holidays)[0] == "TRA"]
+    
+    # Pour Streamlit, on va utiliser une approche glissante simple pour éviter de planter le navigateur
+    # On essaie de poser les CX pour créer la plus longue chaîne
+    for start_idx in range(len(potential_days)):
+        temp_overrides = {}
+        cx_left = max_cx
+        c4_left = max_c4
+        
+        for d in potential_days[start_idx:]:
+            if cx_left > 0:
+                temp_overrides[d] = "CX"
+                cx_left -= 1
+            elif c4_left > 0:
+                temp_overrides[d] = "C4"
+                c4_left -= 1
+        
+        test_calendar = compute_calendar(dates, temp_overrides, parity_choice, fr_holidays)
+        current_absence = sum(1 for c in test_calendar.values() if c != "TRA")
+        
+        if current_absence > max_absence:
+            max_absence = current_absence
+            best_overrides = temp_overrides
+            
+    return best_overrides
+
+# --- INTERFACE ---
+st.title("Calendrier de Congés Interactif & Optimisé")
+
+with st.sidebar:
+    st.header("1. Paramètres")
+    year = st.number_input("Année", 2024, 2030, 2025)
+    month = st.selectbox("Mois", range(1, 13), index=datetime.datetime.now().month - 1)
+    parity = st.radio("Repos (3j) le Vendredi :", ["Semaines Paires", "Semaines Impaires"])
+    
+    st.header("2. Solde disponible")
+    solde_cx = st.slider("Nombre de CX", 0, 30, 5)
+    solde_c4 = st.slider("Nombre de C4", 0, 10, 2)
+    
+    if st.button("🚀 OPTIMISER MON MOIS"):
+        dates = [datetime.date(year, month, d) for d in range(1, calendar.monthrange(year, month)[1] + 1)]
+        fr_hols = holidays.France(years=year)
+        best_plan = optimize_vacations(dates, parity, fr_hols, solde_cx, solde_c4)
+        st.session_state.manual_overrides = best_plan
+        st.success("Calendrier optimisé !")
+
+# Données de base
+dates = [datetime.date(year, month, d) for d in range(1, calendar.monthrange(year, month)[1] + 1)]
+fr_hols = holidays.France(years=year)
+
+if 'manual_overrides' not in st.session_state:
+    st.session_state.manual_overrides = {}
+
+# Calcul final
+final_calendar = compute_calendar(dates, st.session_state.manual_overrides, parity, fr_hols)
+
+# Métriques
+abs_total = sum(1 for c in final_calendar.values() if c != "TRA")
+st.metric("Total jours d'absence (Entreprise)", f"{abs_total} jours")
+
+# Affichage Grille
+cols = st.columns(7)
+for i, name in enumerate(["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]):
+    cols[i].write(f"**{name}**")
+
+grid = st.columns(7)
+for i in range(dates[0].weekday()):
+    grid[i].write("")
+
+for d in dates:
+    code = final_calendar[d]
+    with grid[d.weekday()]:
+        st.markdown(f"""<div class="day-container code-{code}"><div class="day-number">{d.day}</div><div class="code-label">{code}</div></div>""", unsafe_allow_html=True)
+        
+        # Modification manuelle
+        options = ["TRA", "CX", "C4", "ZZ", "FC"] if d in fr_hols else ["TRA", "CX", "C4", "ZZ"]
+        current_idx = options.index(code) if code in options else options.index("ZZ")
+        
+        new_code = st.selectbox("", options, index=current_idx, key=f"s_{d}", label_visibility="collapsed")
+        if new_code != (st.session_state.manual_overrides.get(d, get_base_code(d, parity, fr_hols)[0])):
+            st.session_state.manual_overrides[d] = new_code
             st.rerun()
+
+if st.button("Réinitialiser"):
+    st.session_state.manual_overrides = {}
+    st.rerun()
