@@ -1,5 +1,5 @@
 import streamlit as st
-from datetime import date, timedelta
+from datetime import date
 import calendar
 
 st.set_page_config(layout="wide")
@@ -7,9 +7,9 @@ st.title("📅 Calendrier interactif de congés")
 
 CODES = ["TRA", "CX", "ZZ", "C4", "FC"]
 
-# =========================
-# PARAMÈTRES
-# =========================
+# =====================================================
+# SIDEBAR PARAMÈTRES
+# =====================================================
 
 st.sidebar.header("Paramètres")
 
@@ -26,9 +26,9 @@ month2 = st.sidebar.selectbox("Mois 2", list(range(1, 13)))
 quota_CX = st.sidebar.number_input("Quota CX disponible", 0, 60, 25)
 quota_C4 = st.sidebar.number_input("Quota C4 disponible", 0, 30, 5)
 
-# =========================
-# FÉRIÉS (exemple fixe)
-# =========================
+# =====================================================
+# FÉRIÉS (exemple fixe 2026)
+# =====================================================
 
 FERIES = [
     date(2026, 1, 1),
@@ -41,13 +41,14 @@ FERIES = [
     date(2026, 12, 25)
 ]
 
-# =========================
-# GÉNÉRATION JOURS 2 MOIS
-# =========================
+# =====================================================
+# GÉNÉRATION DES JOURS
+# =====================================================
 
 def generate_month(y, m):
     days = []
     cal = calendar.monthcalendar(y, m)
+
     for week in cal:
         for d in week:
             if d != 0:
@@ -69,31 +70,35 @@ def generate_month(y, m):
                     "code": default_code,
                     "semaine_3ZZ": semaine_3ZZ
                 })
+
     return days
 
-days_list = generate_month(year, month1) + generate_month(year, month2)
 
+days_list = generate_month(year, month1) + generate_month(year, month2)
 days_list = sorted(days_list, key=lambda x: x["date"])
 
-# =========================
-# SÉLECTION UTILISATEUR
-# =========================
+# =====================================================
+# AFFICHAGE SÉLECTION UTILISATEUR
+# =====================================================
 
 st.markdown("### Sélection des jours")
 
-for day in days_list:
+for idx, day in enumerate(days_list):
+
     d = day["date"]
+
     selected = st.selectbox(
         f"{d.strftime('%a')} {d.day}/{d.month}",
         CODES,
         index=CODES.index(day["code"]),
-        key=str(d)
+        key=f"select_{idx}_{d.isoformat()}"
     )
+
     day["code"] = selected
 
-# =========================
-# LOGIQUE VACS + CZ
-# =========================
+# =====================================================
+# LOGIQUE VACS + TRANSFORMATION CZ
+# =====================================================
 
 vacation_active = False
 
@@ -101,30 +106,33 @@ for i in range(len(days_list)):
 
     code = days_list[i]["code"]
 
+    # Début VACS
     if code == "CX":
         vacation_active = True
 
     if vacation_active:
 
+        # Transformation ZZ -> CZ
         if code == "ZZ" and days_list[i]["semaine_3ZZ"]:
 
-            # Vérifie CX futur avant fin VACS
-            for j in range(i+1, len(days_list)):
+            # Cherche CX futur avant fin VACS
+            for j in range(i + 1, len(days_list)):
                 if days_list[j]["code"] == "TRA":
                     break
                 if days_list[j]["code"] == "CX":
                     days_list[i]["code"] = "CZ"
                     break
 
+        # Fin VACS
         if code == "TRA":
             vacation_active = False
 
         if code == "C4":
             vacation_active = False
 
-# =========================
+# =====================================================
 # COMPTEURS
-# =========================
+# =====================================================
 
 absence_total = 0
 used_CX = 0
@@ -152,15 +160,17 @@ st.metric("Absence totale entreprise", absence_total)
 
 col1, col2 = st.columns(2)
 
-col1.metric("CX utilisés (CX + CZ)", used_CX)
-col1.metric("CX restants", remaining_CX)
+with col1:
+    st.metric("CX utilisés (CX + CZ)", used_CX)
+    st.metric("CX restants", remaining_CX)
 
-col2.metric("C4 utilisés", used_C4)
-col2.metric("C4 restants", remaining_C4)
+with col2:
+    st.metric("C4 utilisés", used_C4)
+    st.metric("C4 restants", remaining_C4)
 
-# =========================
-# BOUTON OPTIMISATION
-# =========================
+# =====================================================
+# BOUTON OPTIMISATION (structure prête)
+# =====================================================
 
 if st.button("Optimiser les jours d'absence"):
-    st.info("Moteur d'optimisation avancé à implémenter (maximisation stratégique des ponts).")
+    st.info("Moteur d'optimisation stratégique à implémenter.")
