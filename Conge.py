@@ -2,395 +2,516 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import date, datetime, timedelta
 import calendar
 import json
-from datetime import date, datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from pathlib import Path
+import os
+import holidays
 
-# -------------------------
-# Constants and utilities
-# -------------------------
-DATA_DIR = Path("calendar_data")
-DATA_DIR.mkdir(exist_ok=True)
+# ---------------------------
+# Constantes et utilitaires
+# ---------------------------
+WEEKDAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+WEEKDAY_IDX = {name: i for i, name in enumerate(WEEKDAYS)}  # Lundi=0 ... Dimanche=6
 
 CODES = ["TRA", "ZZ", "CX", "CZ", "C4", "FC"]
-DEFAULT_CODE = "TRA"
 
-def month_key(year: int, month: int):
-    return f"{year:04d}-{month:02d}"
+DATA_FILE = "calendar_state.json"
 
-def save_month_data(key: str, df: pd.DataFrame):
-    path = DATA_DIR / f"{key}.json"
-    df_to_save = df.to_dict(orient="records")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(df_to_save, f, default=str, ensure_ascii=False)
+FR_HOLIDAYS = holidays.France()
 
-def load_month_data(key: str):
-    path = DATA_DIR / f"{key}.json"
-    if not path.exists():
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
-    df['date'] = pd.to_datetime(df['date']).dt.date
-    return df
+# ---------------------------
+# Fonctions de persistance
+# ---------------------------
+def load_state():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-def daterange(start_date, end_date):
-    for n in range(int((end_date - start_date).days) + 1):
-        yield start_date + timedelta(n)
+def save_state(state):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, default=str, ensure_ascii=False, indent=2)
 
-def week_is_even(dt: date):
-    # ISO week number parity: use isocalendar().week
-    return (dt.isocalendar()[1] % 2) == 0
-
-def sunday_start_calendar(year: int, month: int):
-    # returns list of weeks, each week is list of date or None, weeks start Sunday
-    first = date(year, month, 1)
-    last = (first + relativedelta(months=1)) - timedelta(days=1)
-    # find first Sunday on or before first
-    start = first
-    while start.weekday() != 6:  # Sunday = 6
-        start -= timedelta(days=1)
-    end = last
-    while end.weekday() != 5:  # Saturday = 5
-        end += timedelta(days=1)
-    days = list(daterange(start, end))
-    weeks = [days[i:i+7] for i in range(0, len(days), 7)]
+# ---------------------------
+# Génération calendrier
+# ---------------------------
+def month_grid(year, month):
+    """Retourne une liste de semaines; chaque semaine est une liste de 7 dates (datetime.date or None). 
+    Les semaines commencent le dimanche (index 6 dans python calendar) — on réorganise pour commencer dimanche."""
+    cal = calendar.Calendar(firstweekday=6)  # dimanche
+    month_days = list(cal.itermonthdates(year, month))
+    weeks = [month_days[i:i+7] for i in range(0, len(month_days), 7)]
     return weeks
 
-# -------------------------
-# Business logic functions
-# -------------------------
-def init_month_df(year: int, month: int):
-    first = date(year, month, 1)
-    last = (first + relativedelta(months=1)) - timedelta(days=1)
-    rows = []
-    for d in daterange(first, last):
-        rows.append({
-            "date": d,
-            "day": d.day,
-            "weekday": calendar.day_name[d.weekday()],
-            "code": DEFAULT_CODE,
-            "is_fc": False  # user can mark FC
-        })
-    return pd.DataFrame(rows)
+def date_key(d):
+    return d.isoformat()
 
-def apply_zz_pattern(df: pd.DataFrame, zz_even_weeks: int, zz_odd_weeks: int, parity_three_days_is_even: bool):
-    # zz_even_weeks and zz_odd_weeks are counts of ZZ per week (2 or 3)
-    # parity_three_days_is_even True => weeks with 3 ZZ are even weeks
-    df = df.copy()
-    df['weeknum'] = df['date'].apply(lambda d: d.isocalendar()[1])
-    def week_zz_count(d):
-        is_even = (d.isocalendar()[1] % 2) == 0
-        three_is_even = parity_three_days_is_even
-        if is_even:
-            return zz_even_weeks if three_is_even else zz_odd_weeks
-        else:
-            return zz_odd_weeks if three_is_even else zz_even_weeks
-    df['zz_count_week'] = df['date'].apply(week_zz_count)
-    # For each week, mark the first N days of week (starting Sunday) as ZZ by default
-    df['is_zz_candidate'] = False
-    for weeknum, group in df.groupby('weeknum'):
-        week_dates = sorted(group['date'].tolist(), key=lambda d: d.weekday())  # Monday..Sunday ordering
-        # We need Sunday-first ordering for selection
-        # Build Sunday-first list:
-        sunday_first = sorted(group['date'].tolist(), key=lambda d: ((d.weekday()+1) % 7))
-        n = group['zz_count_week'].iloc[0]
-        # choose n days in the week to be ZZ: prefer contiguous at week start (Sunday, Monday...)
-        chosen = set(sunday_first[:n])
-        df.loc[df['date'].isin(chosen), 'is_zz_candidate'] = True
-    # Apply FC: FC remains FC but treated as ZZ for logic
-    df.loc[df['is_fc'] == True, 'is_zz_candidate'] = True
-    # Set code to ZZ if candidate and currently TRA (do not override CX/C4/FC)
-    df.loc[(df['is_zz_candidate']) & (df['code'] == DEFAULT_CODE), 'code'] = "ZZ"
-    return df
+# ---------------------------
+# Initialisation état
+# ---------------------------
+st.set_page_config(layout="wide", page_title="Gestion calendrier congés")
+state = load_state()
 
-def compute_vacs_and_transformations(df: pd.DataFrame):
-    """
-    Apply rules:
-    - VACS starts at first CX and continues until a TRA or a C4 is encountered.
-    - During VACS, if a day is ZZ and the week is a 3-ZZ week, ZZ -> CZ.
-    - FC stays FC but is treated as ZZ for CZ transformation.
-    - C4 ends VACS immediately and counts as absence.
-    """
-    df = df.copy().sort_values('date').reset_index(drop=True)
-    df['in_vacs'] = False
-    in_vacs = False
-    for idx, row in df.iterrows():
-        code = row['code']
-        if code == "CX":
-            in_vacs = True
-            df.at[idx, 'in_vacs'] = True
-            continue
-        if code == "C4":
-            # C4 ends VACS but itself is considered absence
-            df.at[idx, 'in_vacs'] = False
-            in_vacs = False
-            continue
-        if code == "TRA":
-            # TRA ends VACS
-            df.at[idx, 'in_vacs'] = False
-            in_vacs = False
-            continue
-        # For other codes, if currently in_vacs, mark
-        if in_vacs:
-            df.at[idx, 'in_vacs'] = True
-        else:
-            df.at[idx, 'in_vacs'] = False
+if "data" not in state:
+    state["data"] = {}  # structure: { "YYYY-MM": { "YYYY-MM-DD": code, ... }, ... }
+if "settings" not in state:
+    state["settings"] = {}
 
-    # Transform ZZ -> CZ if in_vacs and week has 3 ZZ (we need to detect week type)
-    # Determine week zz_count from existing ZZ candidates per week
-    df['weeknum'] = df['date'].apply(lambda d: d.isocalendar()[1])
-    # For each week, count how many ZZ-like days (ZZ or FC treated as ZZ)
-    week_zz_counts = {}
-    for weeknum, group in df.groupby('weeknum'):
-        # count days that are ZZ or FC
-        count = ((group['code'] == "ZZ") | (group['is_fc'] == True)).sum()
-        week_zz_counts[weeknum] = int(count)
-    df['week_zz_count'] = df['weeknum'].map(week_zz_counts)
+# ---------------------------
+# Sidebar : paramètres globaux
+# ---------------------------
+st.sidebar.header("Paramètres affichage et règles")
 
-    # Apply CZ transformation
-    df['effective_code'] = df['code']
-    for idx, row in df.iterrows():
-        if row['in_vacs'] and (row['code'] == "ZZ" or row['is_fc'] == True):
-            if row['week_zz_count'] >= 3:
-                # ZZ becomes CZ; FC remains FC visually but for counting treat as CZ
-                if row['is_fc']:
-                    # keep FC visually but mark effective_code as CZ for counting
-                    df.at[idx, 'effective_code'] = "CZ"
-                else:
-                    df.at[idx, 'effective_code'] = "CZ"
-        # C4 remains C4, CX remains CX, TRA remains TRA, FC remains FC visually
-    return df
+# Période à afficher : choix dynamique (jour/mois/année)
+today = date.today()
+col1, col2, col3 = st.sidebar.columns([1,1,1])
+with col1:
+    sel_day = st.sidebar.number_input("Jour", min_value=1, max_value=31, value=today.day, step=1)
+with col2:
+    sel_month = st.sidebar.selectbox("Mois", list(range(1,13)), index=today.month-1, format_func=lambda x: calendar.month_name[x])
+with col3:
+    sel_year = st.sidebar.number_input("Année", min_value=1900, max_value=2100, value=today.year, step=1)
 
-def count_absences(df: pd.DataFrame):
-    # Absence days are CX, CZ, C4, and FC when treated as CZ (effective_code)
-    df = df.copy()
-    abs_mask = df['effective_code'].isin(["CX", "CZ", "C4"])
-    total = int(abs_mask.sum())
-    return total
+display_date = date(sel_year, sel_month, min(sel_day, calendar.monthrange(sel_year, sel_month)[1]))
 
-# -------------------------
-# Optimization heuristic
-# -------------------------
-def optimize_placement(original_df: pd.DataFrame, cx_quota: int, c4_quota: int, parity_three_days_is_even: bool, zz_even_weeks: int, zz_odd_weeks: int):
-    """
-    Greedy heuristic:
-    - Start from a copy of df with ZZ pattern applied.
-    - Place CX days one by one: at each step, evaluate placing a CX on each TRA or ZZ day (not FC, not already CX/C4)
-      and compute the delta in total absences after recomputing VACS/CZ. Choose the day with max delta.
-    - After placing all CX, optionally place up to c4_quota C4 days where they increase total absences (rare).
-    - This heuristic tries to maximize total absences given fixed CX quota.
-    """
-    df_base = original_df.copy()
-    # ensure codes are normalized
-    df_base.loc[df_base['code'].isnull(), 'code'] = DEFAULT_CODE
-    # apply initial ZZ pattern
-    df = apply_zz_pattern(df_base, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-    df = compute_vacs_and_transformations(df)
-    df['effective_code'] = df['effective_code'].fillna(df['code'])
-    best_df = df.copy()
-    placed_cx = []
-    placed_c4 = []
+# Option d'afficher 1 ou 2 mois
+show_two_months = st.sidebar.checkbox("Afficher 2 mois (mois suivant inclus)", value=False)
 
-    # Helper to simulate placing a code and computing absences
-    def simulate_with_placement(df_current, placements):
-        df_sim = df_current.copy()
-        for pdate, pcode in placements.items():
-            df_sim.loc[df_sim['date'] == pdate, 'code'] = pcode
-            if pcode == "FC":
-                df_sim.loc[df_sim['date'] == pdate, 'is_fc'] = True
-        df_sim = apply_zz_pattern(df_sim, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-        df_sim = compute_vacs_and_transformations(df_sim)
-        df_sim['effective_code'] = df_sim['effective_code'].fillna(df_sim['code'])
-        return df_sim, count_absences(df_sim)
+# Parité pour semaines à 3 ZZ
+st.sidebar.markdown("**Parité semaines 3 ZZ**")
+parity_choice = st.sidebar.radio("Semaines à 3 ZZ sur :", ("Paires", "Impaires"))
 
-    # initial absence count
-    _, current_abs = simulate_with_placement(df_base, {})
-    # Place CX greedily
-    placements = {}
-    for i in range(cx_quota):
-        best_gain = -1
-        best_date = None
-        best_candidate_df = None
-        # candidate days: those not already CX or C4 or FC (we can place CX on FC? business says FC has priority visual but considered ZZ; we avoid overriding FC)
-        candidates = df_base.loc[~df_base['code'].isin(["CX", "C4"]) & (df_base['is_fc'] == False), 'date'].tolist()
-        for cand in candidates:
-            if cand in placements:
+# Choix du jour supplémentaire ZZ pour semaines impaires/paires (selectbox unique comme demandé)
+zz_odd = st.sidebar.selectbox("ZZ semaine impairs (jour supplémentaire)", WEEKDAYS, index=6)  # default Dimanche
+zz_even = st.sidebar.selectbox("ZZ semaine pairs (jour supplémentaire)", WEEKDAYS, index=6)
+
+# Choix si les semaines doivent contenir 2 ou 3 ZZ
+zz_count_mode = st.sidebar.radio("Nombre de jours ZZ par semaine", ("2 jours (weekend)", "3 jours (weekend + extra)"))
+zz_three = (zz_count_mode == "3 jours (weekend + extra)")
+
+# Compteurs CX et C4
+st.sidebar.markdown("**Compteurs**")
+cx_total = st.sidebar.number_input("Compteur CX (unités totales à poser)", min_value=0, max_value=31, value=3, step=1)
+c4_total = st.sidebar.number_input("Compteur C4 (max 4 unités)", min_value=0, max_value=4, value=0, step=1)
+
+# Bouton optimisation (en bas)
+st.sidebar.markdown("---")
+optimize_btn = st.sidebar.button("Optimiser (mode optimisation)")
+
+# ---------------------------
+# Helpers logique métier
+# ---------------------------
+def is_week_even(d: date):
+    # semaine ISO: isocalendar()[1]; pair si divisible par 2
+    return (d.isocalendar()[1] % 2) == 0
+
+def default_assign_codes_for_month(year, month):
+    """Assigne TRA par défaut puis applique ZZ et FC selon règles de base."""
+    weeks = month_grid(year, month)
+    month_key = f"{year:04d}-{month:02d}"
+    if month_key not in state["data"]:
+        state["data"][month_key] = {}
+    for week in weeks:
+        for d in week:
+            if d.month != month:
                 continue
-            trial_placements = placements.copy()
-            trial_placements[cand] = "CX"
-            df_trial, trial_abs = simulate_with_placement(df_base, trial_placements)
-            gain = trial_abs - current_abs
-            if gain > best_gain:
-                best_gain = gain
-                best_date = cand
-                best_candidate_df = df_trial
-        if best_date is None:
+            key = date_key(d)
+            # Par défaut TRA
+            state["data"][month_key].setdefault(key, "TRA")
+    # Appliquer ZZ selon règle: weekend (Samedi, Dimanche) + extra si 3-ZZ
+    for week in weeks:
+        for d in week:
+            if d.month != month:
+                continue
+            wd = d.weekday()  # Lundi=0 ... Dimanche=6
+            # weekend = Samedi(5) Dimanche(6)
+            if wd in (5,6):
+                state["data"][month_key][date_key(d)] = "ZZ"
+            elif zz_three:
+                # extra day depending on parity of week
+                week_even = is_week_even(d)
+                if week_even and parity_choice == "Paires":
+                    extra = zz_even
+                elif (not week_even) and parity_choice == "Impaires":
+                    extra = zz_odd
+                else:
+                    extra = None
+                if extra is not None and WEEKDAY_IDX[extra] == wd:
+                    state["data"][month_key][date_key(d)] = "ZZ"
+    # Appliquer FC (jours fériés français) — marquer FC but treat as ZZ for logic
+    for d in pd.date_range(start=date(year, month, 1), end=date(year, month, calendar.monthrange(year, month)[1])):
+        d0 = d.date()
+        if d0 in FR_HOLIDAYS:
+            state["data"][month_key][date_key(d0)] = "FC"
+
+def get_code(d: date):
+    key = f"{d.year:04d}-{d.month:02d}"
+    return state["data"].get(key, {}).get(date_key(d), "TRA")
+
+def set_code(d: date, code: str):
+    key = f"{d.year:04d}-{d.month:02d}"
+    state["data"].setdefault(key, {})
+    state["data"][key][date_key(d)] = code
+
+# ---------------------------
+# Appliquer initialisation pour mois(s) affichés
+# ---------------------------
+months_to_show = [display_date]
+if show_two_months:
+    # mois suivant
+    y = sel_year
+    m = sel_month + 1
+    if m == 13:
+        m = 1
+        y += 1
+    months_to_show.append(date(y, m, 1))
+
+for d in months_to_show:
+    default_assign_codes_for_month(d.year, d.month)
+
+# ---------------------------
+# Règles d'évaluation VACS / CZ / C4 / FC
+# ---------------------------
+def is_fc(d: date):
+    return get_code(d) == "FC"
+
+def is_zz(d: date):
+    c = get_code(d)
+    return c == "ZZ" or c == "FC"  # FC treated as ZZ for logic
+
+def is_tra(d: date):
+    return get_code(d) == "TRA"
+
+def is_cx(d: date):
+    return get_code(d) == "CX"
+
+def is_c4(d: date):
+    return get_code(d) == "C4"
+
+def week_has_three_zz(week_start_date: date):
+    """Détermine si la semaine (contenant week_start_date) est une semaine 'à 3 ZZ' selon parité et mode."""
+    # find any day in that week and check parity
+    week_even = is_week_even(week_start_date)
+    if not zz_three:
+        return False
+    if week_even and parity_choice == "Paires":
+        return True
+    if (not week_even) and parity_choice == "Impaires":
+        return True
+    return False
+
+def simulate_vacs_from(start_date: date, months_scope):
+    """Simule la période VACS démarrant au start_date sans interruption (sauf C4 si présent).
+    Retourne la liste des dates considérés en absence (CX, CZ, ZZ traités) et la date de fin (exclusive)."""
+    d = start_date
+    absence = []
+    in_vacs = False
+    # VACS starts at first CX encountered; here we assume start_date is CX
+    in_vacs = True
+    while True:
+        # stop if date outside scope
+        if not any((d.year == m.year and d.month == m.month) for m in months_scope):
             break
-        # commit
-        placements[best_date] = "CX"
-        df_base = df_base.copy()
-        df_base.loc[df_base['date'] == best_date, 'code'] = "CX"
-        current_abs = count_absences(compute_vacs_and_transformations(apply_zz_pattern(df_base, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)))
-        placed_cx.append(best_date)
-
-    # Place C4 greedily (C4 ends VACS; sometimes useful to end a VACS early to allow another CX to start later; but here we only place C4 if it increases absences)
-    for j in range(min(c4_quota, 4)):
-        best_gain = -1
-        best_date = None
-        for cand in df_base.loc[~df_base['code'].isin(["C4"]) & (df_base['is_fc'] == False), 'date'].tolist():
-            trial_df = df_base.copy()
-            trial_df.loc[trial_df['date'] == cand, 'code'] = "C4"
-            trial_df = apply_zz_pattern(trial_df, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-            trial_df = compute_vacs_and_transformations(trial_df)
-            gain = count_absences(trial_df) - current_abs
-            if gain > best_gain:
-                best_gain = gain
-                best_date = cand
-        if best_date is None or best_gain <= 0:
+        code = get_code(d)
+        if code == "TRA":
             break
-        df_base.loc[df_base['date'] == best_date, 'code'] = "C4"
-        placed_c4.append(best_date)
-        current_abs = count_absences(compute_vacs_and_transformations(apply_zz_pattern(df_base, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)))
+        # C4 interrupts VACS but counts as absence
+        if code == "C4":
+            absence.append(d)
+            break
+        # If in VACS and day is ZZ and week is 3-ZZ -> becomes CZ (counted as absence)
+        if in_vacs and is_zz(d):
+            # check if week is 3-ZZ
+            # find a representative day in that week (use d)
+            if week_has_three_zz(d):
+                absence.append(d)  # CZ effectively
+            else:
+                absence.append(d)  # still ZZ but not CZ; counts as absence if contiguous to VACS
+        elif code == "CX" or code == "FC":
+            absence.append(d)
+        else:
+            # any other code (TRA) breaks
+            break
+        d = d + timedelta(days=1)
+    return absence
 
-    # Final recompute
-    df_final = apply_zz_pattern(df_base, zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-    df_final = compute_vacs_and_transformations(df_final)
-    df_final['effective_code'] = df_final['effective_code'].fillna(df_final['code'])
-    return df_final, placed_cx, placed_c4
+def total_absence_count_for_vacs(start_date: date, months_scope):
+    """Calcule le total d'absences liées à une VACS démarrant start_date (incluant CZ transformés)."""
+    abs_days = simulate_vacs_from(start_date, months_scope)
+    # On ajoute aussi les ZZ collés avant et après la période VACS (règle: 'collé à la période de VACS avant et après')
+    if not abs_days:
+        return 0
+    first = abs_days[0]
+    last = abs_days[-1]
+    # compter ZZ/FC contigus avant
+    d = first - timedelta(days=1)
+    while any((d.year == m.year and d.month == m.month) for m in months_scope):
+        if is_zz(d):
+            abs_days.insert(0, d)
+            d = d - timedelta(days=1)
+        else:
+            break
+    # après
+    d = last + timedelta(days=1)
+    while any((d.year == m.year and d.month == m.month) for m in months_scope):
+        if is_zz(d):
+            abs_days.append(d)
+            d = d + timedelta(days=1)
+        else:
+            break
+    # unique
+    unique_days = sorted({dd for dd in abs_days})
+    return len(unique_days), unique_days
 
-# -------------------------
-# Streamlit UI
-# -------------------------
-st.set_page_config(page_title="Gestionnaire de calendrier de congés", layout="wide")
+# ---------------------------
+# Optimisation (heuristique)
+# ---------------------------
+def optimize_placement(months_scope, cx_quota, c4_quota):
+    """Heuristique pour placer CX et C4 afin de maximiser période d'absence totale.
+    Stratégie :
+    - Cherche le meilleur jour unique pour démarrer une VACS (un CX) qui maximise l'absence totale.
+    - Si plusieurs CX disponibles, on tente d'utiliser C4 pour interrompre et relancer une nouvelle VACS plus loin.
+    - On applique placements sur une copie, puis on écrit dans state si amélioration.
+    """
+    # Collect candidate days (days that are not TRA or can be converted)
+    candidates = []
+    for m in months_scope:
+        weeks = month_grid(m.year, m.month)
+        for week in weeks:
+            for d in week:
+                if d.month != m.month:
+                    continue
+                # candidate if day is TRA/ZZ/FC (we can set CX on TRA or ZZ/FC)
+                candidates.append(d)
+    # Evaluate each candidate as single CX start
+    best_score = -1
+    best_plan = None
 
+    # We'll try greedy sequences: pick best start, then optionally place C4 and pick next start, etc.
+    # Limit attempts to reasonable number
+    candidates = sorted(set(candidates))
+    for start in candidates:
+        # copy state codes
+        backup = json.loads(json.dumps(state["data"]))
+        # place CX at start
+        set_code(start, "CX")
+        used_cx = 1
+        used_c4 = 0
+        total_days, days_list = total_absence_count_for_vacs(start, months_scope)
+        score = total_days
+        # try to extend by using remaining CXs: place C4 to interrupt then place next CX at best next start
+        current_end = days_list[-1] if days_list else start
+        while used_cx < cx_quota and used_c4 < c4_quota:
+            # place C4 on the day after current_end if within scope and not TRA
+            next_c4_day = current_end + timedelta(days=1)
+            if not any((next_c4_day.year == m.year and next_c4_day.month == m.month) for m in months_scope):
+                break
+            # place C4 (it counts as absence and interrupts)
+            set_code(next_c4_day, "C4")
+            used_c4 += 1
+            # find next best start after next_c4_day
+            best_local = None
+            best_local_score = -1
+            for cand in candidates:
+                if cand <= next_c4_day:
+                    continue
+                # place CX temporarily
+                prev = state["data"].get(f"{cand.year:04d}-{cand.month:02d}", {}).get(date_key(cand), None)
+                set_code(cand, "CX")
+                s, dl = total_absence_count_for_vacs(start, months_scope)
+                # compute incremental unique days
+                # compute union of days from previous and new
+                # For simplicity, recompute total absence across all CX/C4 placed by scanning months and counting codes that are CX/C4/CZ/ZZ contiguous to CX sequences
+                # We'll approximate by summing s
+                if s > best_local_score:
+                    best_local_score = s
+                    best_local = cand
+                # revert cand
+                if prev is None:
+                    # remove
+                    state["data"][f"{cand.year:04d}-{cand.month:02d}"].pop(date_key(cand), None)
+                else:
+                    set_code(cand, prev)
+            if best_local is None:
+                break
+            # place chosen CX
+            set_code(best_local, "CX")
+            used_cx += 1
+            # recompute total from first start (approx)
+            total_days, days_list = total_absence_count_for_vacs(start, months_scope)
+            score = total_days
+            current_end = days_list[-1] if days_list else current_end
+        # restore state to backup for next iteration
+        state["data"] = backup
+        if score > best_score:
+            best_score = score
+            best_plan = {"start": start, "score": score}
+    # Si on a trouvé un plan, appliquer placements de façon simple : place CX sur best start et éventuellement C4/CX en greedy
+    if best_plan:
+        # apply
+        start = best_plan["start"]
+        set_code(start, "CX")
+        used_cx = 1
+        used_c4 = 0
+        total_days, days_list = total_absence_count_for_vacs(start, months_scope)
+        current_end = days_list[-1] if days_list else start
+        while used_cx < cx_quota and used_c4 < c4_quota:
+            next_c4_day = current_end + timedelta(days=1)
+            if not any((next_c4_day.year == m.year and next_c4_day.month == m.month) for m in months_scope):
+                break
+            set_code(next_c4_day, "C4")
+            used_c4 += 1
+            # find next best start after next_c4_day
+            best_local = None
+            best_local_score = -1
+            for m in months_scope:
+                weeks = month_grid(m.year, m.month)
+                for week in weeks:
+                    for cand in week:
+                        if cand.month != m.month:
+                            continue
+                        if cand <= next_c4_day:
+                            continue
+                        prev = state["data"].get(f"{cand.year:04d}-{cand.month:02d}", {}).get(date_key(cand), None)
+                        set_code(cand, "CX")
+                        s, dl = total_absence_count_for_vacs(start, months_scope)
+                        if s > best_local_score:
+                            best_local_score = s
+                            best_local = cand
+                        # revert
+                        if prev is None:
+                            state["data"][f"{cand.year:04d}-{cand.month:02d}"].pop(date_key(cand), None)
+                        else:
+                            set_code(cand, prev)
+            if best_local is None:
+                break
+            set_code(best_local, "CX")
+            used_cx += 1
+            total_days, days_list = total_absence_count_for_vacs(start, months_scope)
+            current_end = days_list[-1] if days_list else current_end
+    # sauvegarder
+    save_state(state)
+    return best_score
+
+# ---------------------------
+# Interface principale : affichage calendrier en grille (type Outlook)
+# ---------------------------
 st.title("Gestionnaire de calendrier de congés")
 
-# Sidebar: period selector and options
-st.sidebar.header("Période et paramètres")
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    start_month = st.date_input("Date de début (jour=1 pour sélectionner un mois)", value=date.today().replace(day=1))
-with col2:
-    show_two_months = st.sidebar.checkbox("Afficher 2 mois", value=False)
+# Afficher chaque mois en colonne
+cols = st.columns(len(months_to_show))
+for idx, m in enumerate(months_to_show):
+    with cols[idx]:
+        st.subheader(f"{calendar.month_name[m.month]} {m.year}")
+        weeks = month_grid(m.year, m.month)
+        # Table header: Sunday..Saturday (we want weeks starting Sunday)
+        header = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
+        # Build a DataFrame for layout with custom HTML per cell using st.markdown
+        # We'll render grid manually
+        for week in weeks:
+            cols_week = st.columns(7)
+            for i, d in enumerate(week):
+                col = cols_week[i]
+                with col:
+                    if d.month != m.month:
+                        st.write("")  # empty cell
+                        continue
+                    code = get_code(d)
+                    # Visual priority: FC absolute visual priority
+                    display_code = code
+                    # Color mapping
+                    color = "#ffffff"
+                    if display_code == "TRA":
+                        color = "#f0f0f0"
+                    elif display_code == "ZZ":
+                        color = "#cfe8ff"
+                    elif display_code == "CX":
+                        color = "#ffd9b3"
+                    elif display_code == "CZ":
+                        color = "#ffb3b3"
+                    elif display_code == "C4":
+                        color = "#d1c4e9"
+                    elif display_code == "FC":
+                        color = "#ffef9f"
+                    # Cell content: numéro du jour, jour en toutes lettres, code statut
+                    day_label = f"**{d.day}**\n\n{WEEKDAYS[d.weekday()]}\n\n**{display_code}**"
+                    st.markdown(f"<div style='background:{color};padding:6px;border-radius:6px'>{day_label}</div>", unsafe_allow_html=True)
+                    # Selectbox discret pour modifier le code du jour
+                    sel = st.selectbox(f"Code {d.isoformat()}", CODES, index=CODES.index(code), key=f"sel_{d.isoformat()}")
+                    if sel != code:
+                        set_code(d, sel)
+        st.markdown("---")
 
-# ZZ selectors
-st.sidebar.markdown("**Sélecteurs ZZ**")
-parity_choice = st.sidebar.radio("Semaines à 3 jours ZZ sur :", ("Paires", "Impaire"))
-parity_three_days_is_even = (parity_choice == "Paires")
-# For flexibility allow user to set counts (2 or 3)
-zz_even_weeks = st.sidebar.selectbox("ZZ jours semaine paire", options=[2,3], index=0 if parity_three_days_is_even else 1)
-zz_odd_weeks = st.sidebar.selectbox("ZZ jours semaine impaire", options=[2,3], index=1 if parity_three_days_is_even else 0)
-
-st.sidebar.markdown("**Compteurs**")
-cx_quota = st.sidebar.number_input("Quota total CX à poser", min_value=0, max_value=31, value=3, step=1)
-c4_quota = st.sidebar.number_input("Quota C4 (max 4 unités)", min_value=0, max_value=4, value=0, step=1)
-
-# Load or init month(s)
-months_to_show = 2 if show_two_months else 1
-base_year = start_month.year
-base_month = start_month.month
-
-dfs = []
-for m in range(months_to_show):
-    dt = (start_month + relativedelta(months=m))
-    key = month_key(dt.year, dt.month)
-    loaded = load_month_data(key)
-    if loaded is None:
-        dfm = init_month_df(dt.year, dt.month)
-    else:
-        dfm = loaded
-        # ensure columns exist
-        if 'is_fc' not in dfm.columns:
-            dfm['is_fc'] = False
-    dfs.append((key, dfm))
-
-# Provide a global control to reset month data
-if st.sidebar.button("Réinitialiser mois affiché"):
-    for key, _ in dfs:
-        path = DATA_DIR / f"{key}.json"
-        if path.exists():
-            path.unlink()
-    st.experimental_rerun()
-
-# Main area: render months
-for key, df in dfs:
-    st.subheader(f"Mois : {key}")
-    # allow marking FC days quickly: multiselect of dates
-    fc_dates = st.multiselect(f"Marquer jours fériés (FC) pour {key}", options=[d.strftime("%Y-%m-%d") for d in df['date']], default=[d.strftime("%Y-%m-%d") for d in df.loc[df['is_fc']==True,'date']])
-    df['is_fc'] = df['date'].apply(lambda d: d.strftime("%Y-%m-%d") in fc_dates)
-
-    # Apply ZZ pattern and compute derived fields for display
-    df_display = apply_zz_pattern(df.copy(), zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-    df_display = compute_vacs_and_transformations(df_display)
-    df_display['effective_code'] = df_display['effective_code'].fillna(df_display['code'])
-
-    # Render calendar grid (weeks start Sunday)
-    weeks = sunday_start_calendar(int(key.split("-")[0]), int(key.split("-")[1]))
-    for week in weeks:
-        cols = st.columns(7)
-        for i, day in enumerate(week):
-            with cols[i]:
-                if day.month != int(key.split("-")[1]):
-                    st.write("")  # empty cell for other months
+# ---------------------------
+# Affichage compteurs et métriques
+# ---------------------------
+# Calculer total absence dans période VACS + ZZ collés
+def compute_total_absence_for_scope(months_scope):
+    # find first CX in scope
+    all_dates = []
+    for m in months_scope:
+        weeks = month_grid(m.year, m.month)
+        for week in weeks:
+            for d in week:
+                if d.month != m.month:
                     continue
-                row = df_display.loc[df_display['date'] == day].iloc[0]
-                # Visual priority: FC displayed prominently
-                display_code = row['code']
-                effective = row['effective_code']
-                day_label = f"**{row['day']} - {row['weekday']}**"
-                st.markdown(day_label)
-                # Show current code and effective code
-                st.write(f"**Code:** {display_code}  ")
-                st.write(f"**Effectif:** {effective}  ")
-                # selectbox to change code manually
-                new_code = st.selectbox(f"Modifier {day}", options=CODES, index=CODES.index(display_code), key=f"{key}_{day}")
-                # checkbox to mark FC
-                is_fc = st.checkbox("FC", value=row['is_fc'], key=f"fc_{key}_{day}")
-                # update df
-                df.loc[df['date'] == day, 'code'] = new_code
-                df.loc[df['date'] == day, 'is_fc'] = is_fc
+                all_dates.append(d)
+    all_dates = sorted(all_dates)
+    # find first CX
+    first_cx = None
+    for d in all_dates:
+        if get_code(d) == "CX":
+            first_cx = d
+            break
+    if not first_cx:
+        return 0, []
+    count, days = total_absence_count_for_vacs(first_cx, months_scope)
+    return count, days
 
-    # Save month data after edits
-    save_month_data(key, df)
+total_abs, abs_days = compute_total_absence_for_scope(months_to_show)
+st.sidebar.markdown(f"**Total absence (VACS + ZZ collés)** : **{total_abs}** jours")
 
-    # Show summary counters for this month
-    df_after = apply_zz_pattern(df.copy(), zz_even_weeks, zz_odd_weeks, parity_three_days_is_even)
-    df_after = compute_vacs_and_transformations(df_after)
-    df_after['effective_code'] = df_after['effective_code'].fillna(df_after['code'])
-    total_abs = count_absences(df_after)
-    st.info(f"**Total jours d'absence (sur la période affichée)** : {total_abs}")
+# ---------------------------
+# Optimisation déclenchée
+# ---------------------------
+if optimize_btn:
+    with st.spinner("Optimisation en cours..."):
+        score = optimize_placement(months_to_show, int(cx_total), int(c4_total))
+    st.success(f"Optimisation terminée. Score estimé (jours d'absence maximisés) : {score}")
+    # reload state and recompute
+    save_state(state)
 
-# Global optimization controls
-st.markdown("---")
-st.header("Optimisation automatique")
-st.write("Le mode optimisation place les CX et C4 (dans la limite des quotas) pour maximiser le total d'absences pendant les périodes VACS.")
+# ---------------------------
+# Boutons sauvegarde / reset
+# ---------------------------
+col_save, col_reset = st.columns([1,1])
+with col_save:
+    if st.button("Sauvegarder état"):
+        save_state(state)
+        st.success("État sauvegardé.")
+with col_reset:
+    if st.button("Réinitialiser mois affiché"):
+        # reset only months shown
+        for m in months_to_show:
+            key = f"{m.year:04d}-{m.month:02d}"
+            if key in state["data"]:
+                state["data"].pop(key, None)
+        save_state(state)
+        st.experimental_rerun()
 
-if st.button("Lancer optimisation"):
-    # Combine all months into one df for optimization and persistence
-    combined = pd.concat([d for _, d in dfs], ignore_index=True)
-    combined = combined.sort_values('date').reset_index(drop=True)
-    # Run optimizer
-    optimized_df, placed_cx, placed_c4 = optimize_placement(combined.copy(), int(cx_quota), int(c4_quota), parity_three_days_is_even, zz_even_weeks, zz_odd_weeks)
-    # Persist results back to per-month files
-    for key, _ in dfs:
-        year, month = map(int, key.split("-"))
-        mask = optimized_df['date'].apply(lambda d: d.year == year and d.month == month)
-        df_month = optimized_df.loc[mask, ['date','day','weekday','code','is_fc','effective_code']].copy()
-        # ensure 'code' column exists: optimized_df may have effective_code; prefer code if present
-        if 'code' not in df_month.columns:
-            df_month['code'] = df_month['effective_code']
-        # Save: keep only date, code, is_fc
-        df_to_save = df_month[['date','day','weekday','code','is_fc']].copy()
-        save_month_data(key, df_to_save)
-    st.success(f"Optimisation terminée. CX placés: {len(placed_cx)}; C4 placés: {len(placed_c4)}")
-    if placed_cx:
-        st.write("Dates CX placés :", ", ".join([d.strftime("%Y-%m-%d") for d in placed_cx]))
-    if placed_c4:
-        st.write("Dates C4 placés :", ", ".join([d.strftime("%Y-%m-%d") for d in placed_c4]))
-    st.experimental_rerun()
+# ---------------------------
+# Affichage détail jours d'absence
+# ---------------------------
+if abs_days:
+    st.markdown("### Détails jours d'absence liés à la période VACS")
+    df = pd.DataFrame({"date": [d.isoformat() for d in abs_days], "code": [get_code(d) for d in abs_days]})
+    st.table(df)
 
-st.markdown("---")
-st.caption("Notes :\n- Les jours fériés (FC) sont marqués manuellement et restent visibles comme FC mais sont traités comme ZZ pour la logique CZ.\n- La persistance est locale dans le dossier calendar_data. Afficher 2 mois applique les mêmes règles sur la continuité entre mois.")
+# ---------------------------
+# Fin
+# ---------------------------
+st.markdown("**Légende codes** : TRA = Jour travaillé; ZZ = Repos habituel; CX = Congé posé; CZ = Congé généré; C4 = Congé supplémentaire; FC = Jour férié.")
