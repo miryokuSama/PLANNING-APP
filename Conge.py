@@ -156,7 +156,6 @@ def treated_as_zz(d: date):
     return c == "ZZ" or c == "FC"
 
 def week_is_three_zz(d: date):
-    # A week est "3-ZZ" si la parité correspond et la sélection pour cette parité contient 3 jours
     week_even = is_week_even(d)
     chosen = zz_even if week_even else zz_odd
     if len(chosen) == 3:
@@ -176,7 +175,6 @@ def apply_default_zz_and_fc_for_month(year, month):
                 state["data"][key][date_key(d)] = "FC"
                 continue
             state["data"][key].setdefault(date_key(d), "TRA")
-    # Apply ZZ according to selections
     for w in month_grid(year, month):
         for d in w:
             if d.month != month:
@@ -191,11 +189,9 @@ def apply_default_zz_and_fc_for_month(year, month):
 # Application des règles VACS / CZ / C4
 # ---------------------------
 def apply_business_rules(months_scope):
-    # Apply defaults first
     for m in months_scope:
         apply_default_zz_and_fc_for_month(m.year, m.month)
 
-    # Clear previous CZ marks (recompute)
     for m in months_scope:
         key = month_key(m.year, m.month)
         for w in month_grid(m.year, m.month):
@@ -213,7 +209,6 @@ def apply_business_rules(months_scope):
                         else:
                             state["data"][key][date_key(d)] = "TRA"
 
-    # Scan chronologically and apply VACS logic
     all_dates = []
     for m in months_scope:
         for w in month_grid(m.year, m.month):
@@ -235,7 +230,6 @@ def apply_business_rules(months_scope):
         if code == "TRA":
             in_vacs = False
             continue
-        # If in VACS and day is ZZ/FC and week is 3-ZZ -> CZ
         if in_vacs and treated_as_zz(d) and week_is_three_zz(d):
             state["data"][month_key(d.year, d.month)][date_key(d)] = "CZ"
 
@@ -257,7 +251,6 @@ def simulate_vacs_from(start_date, months_scope):
         d = d + timedelta(days=1)
     if not abs_days:
         return []
-    # add contiguous ZZ/FC before and after
     first = abs_days[0]
     last = abs_days[-1]
     d = first - timedelta(days=1)
@@ -381,21 +374,39 @@ def optimize_placement(months_scope, cx_quota, c4_quota):
     return final_cnt, placed_cx, placed_c4, final_days
 
 # ---------------------------
-# Reactivity control
+# Reactivity control (callbacks)
 # ---------------------------
 if "needs_rerun" not in st.session_state:
     st.session_state["needs_rerun"] = False
 
+def on_selectbox_change(date_iso):
+    """
+    Callback when a day's selectbox changes.
+    The selectbox value is stored in st.session_state under key 'sel_{date_iso}'.
+    """
+    key = f"sel_{date_iso}"
+    new_value = st.session_state.get(key)
+    # parse date_iso to date object
+    d = date.fromisoformat(date_iso)
+    # update state
+    set_code(d, new_value)
+    # mark for rerun after rendering loop
+    st.session_state["needs_rerun"] = True
+    # save state now (rules will be reapplied after rerun)
+    save_state(state)
+
+# ---------------------------
+# Initial application of rules
+# ---------------------------
 apply_business_rules(months_to_show)
 save_state(state)
 
 # ---------------------------
-# Main UI : affichage calendrier
+# Main UI : affichage calendrier (selectbox with on_change)
 # ---------------------------
 st.title("Gestionnaire de calendrier de congés")
 
 cols = st.columns(len(months_to_show))
-manual_change = False
 
 for idx, m in enumerate(months_to_show):
     with cols[idx]:
@@ -436,3 +447,59 @@ for idx, m in enumerate(months_to_show):
                         f"</div>",
                         unsafe_allow_html=True
                     )
+                    # Prepare session_state key so selectbox shows current code
+                    key = f"sel_{d.isoformat()}"
+                    if key not in st.session_state:
+                        st.session_state[key] = code
+                    # create selectbox with on_change callback
+                    st.selectbox("", CODES, key=key, on_change=on_selectbox_change, args=(d.isoformat(),), label_visibility="collapsed")
+
+st.markdown("---")
+
+# After rendering, if any change occurred, reapply rules, save and rerun once
+if st.session_state.get("needs_rerun", False):
+    apply_business_rules(months_to_show)
+    save_state(state)
+    st.session_state["needs_rerun"] = False
+    st.experimental_rerun()
+
+# ---------------------------
+# Metrics and optimisation
+# ---------------------------
+total_abs, abs_days = total_absence_for_scope(months_to_show)
+st.sidebar.markdown(f"**Total absence (VACS + ZZ collés)** : **{total_abs}** jours")
+
+if optimize_btn:
+    with st.spinner("Optimisation en cours..."):
+        final_cnt, placed_cx, placed_c4, final_days = optimize_placement(months_to_show, cx_quota, c4_quota)
+    st.success(f"Optimisation terminée. Jours d'absence totaux : {final_cnt}")
+    if placed_cx:
+        st.sidebar.markdown(f"CX placés : {', '.join([d.strftime('%d/%m/%Y') for d in placed_cx])}")
+    if placed_c4:
+        st.sidebar.markdown(f"C4 placés : {', '.join([d.strftime('%d/%m/%Y') for d in placed_c4])}")
+    apply_business_rules(months_to_show)
+    save_state(state)
+    st.experimental_rerun()
+
+# Save / reset controls
+col_save, col_reset = st.columns([1,1])
+with col_save:
+    if st.button("Sauvegarder état"):
+        save_state(state)
+        st.success("État sauvegardé.")
+with col_reset:
+    if st.button("Réinitialiser mois affiché"):
+        for m in months_to_show:
+            key = month_key(m.year, m.month)
+            if key in state["data"]:
+                state["data"].pop(key, None)
+        save_state(state)
+        st.experimental_rerun()
+
+# Détail jours d'absence
+if abs_days:
+    st.markdown("### Détails jours d'absence liés à la période VACS")
+    df = pd.DataFrame({"date": [d.strftime("%d/%m/%Y") for d in abs_days], "jour": [weekday_fr(d) for d in abs_days], "code": [get_code(d) for d in abs_days]})
+    st.table(df)
+
+st.markdown("**Légende** : TRA = Jour travaillé; ZZ = Repos habituel; CX = Congé posé; CZ = Congé généré; C4 = Congé supplémentaire; FC = Jour férié.")
