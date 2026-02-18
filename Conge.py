@@ -19,6 +19,19 @@ WEEKDAYS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dim
 HEADER_DAYS = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"]
 
 # ---------------------------
+# Helpers safe rerun
+# ---------------------------
+def safe_rerun():
+    """Appelle st.experimental_rerun() de façon sûre (protège contre AttributeError)."""
+    rerun = getattr(st, "experimental_rerun", None)
+    if callable(rerun):
+        try:
+            rerun()
+        except Exception:
+            # si rerun échoue, on stoppe proprement la session pour éviter l'AttributeError
+            st.stop()
+
+# ---------------------------
 # Persistence helpers
 # ---------------------------
 def load_state():
@@ -30,9 +43,9 @@ def load_state():
             return {"data": {}, "settings": {}}
     return {"data": {}, "settings": {}}
 
-def save_state(state):
+def save_state(state_obj):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(state_obj, f, ensure_ascii=False, indent=2, default=str)
 
 state = load_state()
 if "data" not in state:
@@ -152,10 +165,12 @@ def is_week_even(d: date):
     return (d.isocalendar()[1] % 2) == 0
 
 def treated_as_zz(d: date):
+    """Retourne True si le jour est traité comme ZZ pour la logique (ZZ ou FC)."""
     c = get_code(d)
     return c == "ZZ" or c == "FC"
 
 def week_is_three_zz(d: date):
+    """Une semaine est '3-ZZ' si la sélection pour sa parité contient 3 jours et la parité correspond."""
     week_even = is_week_even(d)
     chosen = zz_even if week_even else zz_odd
     if len(chosen) == 3:
@@ -175,6 +190,7 @@ def apply_default_zz_and_fc_for_month(year, month):
                 state["data"][key][date_key(d)] = "FC"
                 continue
             state["data"][key].setdefault(date_key(d), "TRA")
+    # Appliquer ZZ selon sélection (sans écraser FC)
     for w in month_grid(year, month):
         for d in w:
             if d.month != month:
@@ -189,9 +205,18 @@ def apply_default_zz_and_fc_for_month(year, month):
 # Application des règles VACS / CZ / C4
 # ---------------------------
 def apply_business_rules(months_scope):
+    """
+    Applique :
+    - defaults (TRA/ZZ/FC),
+    - calcule les périodes VACS (déclenchées par CX),
+    - transforme ZZ -> CZ uniquement si en VACS et semaine à 3 ZZ,
+    - FC reste FC visuellement mais est traité comme ZZ pour la logique.
+    """
+    # 1) Defaults
     for m in months_scope:
         apply_default_zz_and_fc_for_month(m.year, m.month)
 
+    # 2) Revenir sur CZ précédents (ne pas écraser FC)
     for m in months_scope:
         key = month_key(m.year, m.month)
         for w in month_grid(m.year, m.month):
@@ -199,6 +224,7 @@ def apply_business_rules(months_scope):
                 if d.month != m.month:
                     continue
                 if state["data"][key].get(date_key(d)) == "CZ":
+                    # si jour férié, garder FC; sinon remettre ZZ si sélection le prévoit, sinon TRA
                     if d in FR_HOLIDAYS:
                         state["data"][key][date_key(d)] = "FC"
                     else:
@@ -209,6 +235,7 @@ def apply_business_rules(months_scope):
                         else:
                             state["data"][key][date_key(d)] = "TRA"
 
+    # 3) Parcours chronologique pour appliquer VACS et CZ
     all_dates = []
     for m in months_scope:
         for w in month_grid(m.year, m.month):
@@ -225,18 +252,72 @@ def apply_business_rules(months_scope):
             in_vacs = True
             continue
         if code == "C4":
+            # C4 compte comme absence mais interrompt la VACS
             in_vacs = False
             continue
         if code == "TRA":
             in_vacs = False
             continue
+        # Si on est en VACS et le jour est traité comme ZZ et la semaine est 3-ZZ :
+        # - si le jour est ZZ (non-FC) -> on le marque CZ
+        # - si le jour est FC -> on le laisse FC (visuel) mais il sera compté comme CZ dans les calculs via is_effective_cz()
         if in_vacs and treated_as_zz(d) and week_is_three_zz(d):
-            state["data"][month_key(d.year, d.month)][date_key(d)] = "CZ"
+            if get_code(d) == "ZZ":
+                state["data"][month_key(d.year, d.month)][date_key(d)] = "CZ"
+            # si FC, on ne change pas la valeur stockée (reste "FC"), mais la logique d'absence le traitera comme CZ
 
 # ---------------------------
-# Absence counting utilities
+# Fonctions d'évaluation CZ effectif et d'absence
 # ---------------------------
+def is_effective_cz(d: date, months_scope):
+    """
+    Retourne True si le jour doit être considéré comme CZ pour le calcul d'absence :
+    - stocké "CZ" OU
+    - stocké "FC" et en période VACS et semaine à 3-ZZ
+    """
+    code = get_code(d)
+    if code == "CZ":
+        return True
+    if code == "FC":
+        # pour savoir si FC est 'effectivement CZ', il faut vérifier s'il est dans une VACS
+        # On détecte la présence d'une VACS qui englobe ce jour en recherchant un CX antérieur non interrompu par TRA/C4
+        # Parcourir en arrière jusqu'à trouver un CX ou une interruption
+        dd = d
+        # chercher le début de la séquence en remontant
+        while True:
+            prev = dd - timedelta(days=1)
+            # si prev hors scope, on arrête
+            if not any((prev.year == m.year and prev.month == m.month) for m in months_scope):
+                break
+            prev_code = get_code(prev)
+            if prev_code == "CX":
+                # il y a un CX avant sans interruption -> d est dans VACS
+                # vérifier que la semaine est 3-ZZ
+                return week_is_three_zz(d)
+            if prev_code in ("TRA", "C4"):
+                break
+            dd = prev
+        # aussi vérifier si d lui-même est après un CX (parcours avant n'a trouvé CX mais peut y avoir CX sur d ou après)
+        # on vérifie s'il existe un CX avant d dans la période sans interruption
+        dd = d
+        while True:
+            prev = dd - timedelta(days=1)
+            if not any((prev.year == m.year and prev.month == m.month) for m in months_scope):
+                break
+            prev_code = get_code(prev)
+            if prev_code == "CX":
+                return week_is_three_zz(d)
+            if prev_code in ("TRA", "C4"):
+                break
+            dd = prev
+    return False
+
 def simulate_vacs_from(start_date, months_scope):
+    """
+    Retourne la liste unique et triée des jours d'absence pour une VACS démarrant à start_date.
+    Les jours comptés : CX, C4, CZ (stocké) et ZZ/FC qui sont traités comme CZ via is_effective_cz.
+    On arrête la VACS au premier TRA ou après un C4.
+    """
     abs_days = []
     d = start_date
     while True:
@@ -245,14 +326,28 @@ def simulate_vacs_from(start_date, months_scope):
         code = get_code(d)
         if code == "TRA":
             break
-        abs_days.append(d)
-        if code == "C4":
-            break
+        # CX, C4, CZ sont comptés ; FC peut être compté via is_effective_cz
+        if code in ("CX", "C4", "CZ"):
+            abs_days.append(d)
+        elif code == "ZZ":
+            # si ZZ stocké mais en semaine 3-ZZ et en VACS -> CZ effectif (mais ici on ne sait pas si on est en VACS)
+            # pour la simulation, on considère la VACS démarrant à start_date, donc on est en VACS
+            if week_is_three_zz(d):
+                abs_days.append(d)  # compte comme CZ
+        elif code == "FC":
+            # FC treated as ZZ for logic; if week_is_three_zz -> count as CZ
+            if week_is_three_zz(d):
+                abs_days.append(d)
+            else:
+                # FC not in 3-ZZ week: still counts as absence if contiguous to VACS (we'll include contiguous ZZ/FC later)
+                abs_days.append(d)
         d = d + timedelta(days=1)
     if not abs_days:
         return []
+    # ajouter ZZ/FC contigus avant et après
     first = abs_days[0]
     last = abs_days[-1]
+    # avant
     d = first - timedelta(days=1)
     while any((d.year == m.year and d.month == m.month) for m in months_scope):
         if treated_as_zz(d):
@@ -260,6 +355,7 @@ def simulate_vacs_from(start_date, months_scope):
             d = d - timedelta(days=1)
         else:
             break
+    # après
     d = last + timedelta(days=1)
     while any((d.year == m.year and d.month == m.month) for m in months_scope):
         if treated_as_zz(d):
@@ -271,6 +367,7 @@ def simulate_vacs_from(start_date, months_scope):
     return unique
 
 def total_absence_for_scope(months_scope):
+    # trouver le premier CX dans la période
     all_dates = []
     for m in months_scope:
         for w in month_grid(m.year, m.month):
@@ -311,6 +408,7 @@ def optimize_placement(months_scope, cx_quota, c4_quota):
     placed_c4 = []
     baseline_cnt, _ = evaluate_total_absence_with_plan(months_scope)
 
+    # placer CX par gain marginal (fallback earliest pour consommer quota)
     for _ in range(int(cx_quota)):
         best_gain = -1
         best_day = None
@@ -321,6 +419,7 @@ def optimize_placement(months_scope, cx_quota, c4_quota):
             set_code(cand, "CX")
             cnt, _ = evaluate_total_absence_with_plan(months_scope)
             gain = cnt - baseline_cnt
+            # revert
             if prev is None:
                 state["data"][month_key(cand.year, cand.month)].pop(date_key(cand), None)
             else:
@@ -339,6 +438,7 @@ def optimize_placement(months_scope, cx_quota, c4_quota):
         placed_cx.append(best_day)
         baseline_cnt, _ = evaluate_total_absence_with_plan(months_scope)
 
+    # placer C4 par gain marginal (fallback heuristique)
     for _ in range(int(c4_quota)):
         best_gain = -1
         best_day = None
@@ -382,18 +482,16 @@ if "needs_rerun" not in st.session_state:
 def on_selectbox_change(date_iso):
     """
     Callback when a day's selectbox changes.
-    The selectbox value is stored in st.session_state under key 'sel_{date_iso}'.
+    Update state and mark for rerun.
     """
     key = f"sel_{date_iso}"
     new_value = st.session_state.get(key)
-    # parse date_iso to date object
     d = date.fromisoformat(date_iso)
-    # update state
     set_code(d, new_value)
-    # mark for rerun after rendering loop
-    st.session_state["needs_rerun"] = True
-    # save state now (rules will be reapplied after rerun)
+    # save immediately
     save_state(state)
+    # mark for rerun after rendering
+    st.session_state["needs_rerun"] = True
 
 # ---------------------------
 # Initial application of rules
@@ -426,6 +524,8 @@ for idx, m in enumerate(months_to_show):
                     code = get_code(d)
                     date_str = display_date_str(d)
                     day_name = weekday_fr(d)
+                    # determine display code: if FC but is_effective_cz -> show "FC" visually but will be counted as CZ
+                    display_code = code
                     color = "#ffffff"
                     if code == "TRA":
                         color = "#f7f7f7"
@@ -443,25 +543,24 @@ for idx, m in enumerate(months_to_show):
                         f"<div style='background:{color};padding:8px;border-radius:6px'>"
                         f"<div style='font-weight:600'>{date_str}</div>"
                         f"<div style='color:#333'>{day_name}</div>"
-                        f"<div style='margin-top:6px;font-weight:700'>{code}</div>"
+                        f"<div style='margin-top:6px;font-weight:700'>{display_code}</div>"
                         f"</div>",
                         unsafe_allow_html=True
                     )
-                    # Prepare session_state key so selectbox shows current code
+                    # selectbox with callback
                     key = f"sel_{d.isoformat()}"
                     if key not in st.session_state:
                         st.session_state[key] = code
-                    # create selectbox with on_change callback
                     st.selectbox("", CODES, key=key, on_change=on_selectbox_change, args=(d.isoformat(),), label_visibility="collapsed")
 
 st.markdown("---")
 
-# After rendering, if any change occurred, reapply rules, save and rerun once
+# After rendering, if any change occurred, reapply rules, save and rerun once (safe)
 if st.session_state.get("needs_rerun", False):
     apply_business_rules(months_to_show)
     save_state(state)
     st.session_state["needs_rerun"] = False
-    st.experimental_rerun()
+    safe_rerun()
 
 # ---------------------------
 # Metrics and optimisation
@@ -479,7 +578,7 @@ if optimize_btn:
         st.sidebar.markdown(f"C4 placés : {', '.join([d.strftime('%d/%m/%Y') for d in placed_c4])}")
     apply_business_rules(months_to_show)
     save_state(state)
-    st.experimental_rerun()
+    safe_rerun()
 
 # Save / reset controls
 col_save, col_reset = st.columns([1,1])
@@ -494,7 +593,7 @@ with col_reset:
             if key in state["data"]:
                 state["data"].pop(key, None)
         save_state(state)
-        st.experimental_rerun()
+        safe_rerun()
 
 # Détail jours d'absence
 if abs_days:
